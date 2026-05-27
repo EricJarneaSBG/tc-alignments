@@ -1,0 +1,7 @@
+{
+  "name": "LandXML Alignment Viewer",
+  "version": "1.0.0",
+  "main": "index.html",
+  "icon": "",
+  "permissions": ["viewer"]
+}
