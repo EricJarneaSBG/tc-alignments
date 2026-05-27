@@ -1,7 +1,18 @@
 {
-  "name": "LandXML Alignment Viewer",
+  "manifestVersion": 1,
+  "id": "tc-alignments",
+  "name": "TC Alignments",
+  "description": "Alignment viewer for LandXML with chainage and slopes",
   "version": "1.0.0",
-  "main": "index.html",
-  "icon": "",
-  "permissions": ["viewer"]
+  "author": "Eric Jarnea",
+
+  "views": [
+    {
+      "type": "iframe",
+      "id": "tc-alignments-view",
+      "name": "TC Alignments",
+      "url": "https://ericjarneasbg.github.io/tc-alignments/index.html",
+      "icon": ""
+    }
+  ]
 }
