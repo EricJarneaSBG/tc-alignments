@@ -1,22 +1,45 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <title>LandXML Stationing</title>
-
-  <script src="https://components.connect.trimble.com/trimble-connect-workspace-api/index.js"></script>
-
-  <link rel="stylesheet" href="style.css" />
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LandXML Alignment Visualizer</title>
+    <link rel="stylesheet" href="style.css">
 </head>
 <body>
-
-  <div id="toolbar">
-    <input type="file" id="fileInput" accept=".xml,.landxml" />
-    <button id="loadBtn">Load Alignment</button>
-  </div>
-
-  <div id="status">Ready</div>
-
-  <script src="app.js"></script>
+    <div id="container">
+        <header>
+            <h1>LandXML Alignment</h1>
+        </header>
+        <main>
+            <div class="controls">
+                <input type="file" id="file-input" accept=".xml,.landxml">
+                <label for="file-input" class="button">Load LandXML</label>
+                <button id="clear-btn" class="button secondary">Clear Viewer</button>
+            </div>
+            <div id="status-container">
+                <p id="status">Waiting for LandXML file...</p>
+                <div id="alignment-list" class="hidden">
+                    <h3>Select Alignments:</h3>
+                    <div id="list-items"></div>
+                    <button id="draw-btn" class="button">Draw Selected</button>
+                </div>
+            </div>
+            <div class="settings">
+                <label>
+                    <input type="checkbox" id="swap-coords"> Swap Northing/Easting (X/Y)
+                </label>
+                <label>
+                    Stationing Interval:
+                    <input type="number" id="station-interval" value="100" min="10" step="10"> m
+                </label>
+            </div>
+        </main>
+        <footer>
+            <p>Trimble Connect Extension</p>
+        </footer>
+    </div>
+    <script src="https://components.connect.trimble.com/trimble-connect-workspace-api/index.js"></script>
+    <script src="app.js"></script>
 </body>
 </html>

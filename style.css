@@ -1,16 +1,118 @@
 body {
-  margin: 0;
-  padding: 10px;
-  font-family: Arial, sans-serif;
-  background: #f5f5f5;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    margin: 0;
+    padding: 0;
+    background-color: #f4f4f4;
+    color: #333;
+    overflow-x: hidden;
 }
 
-#toolbar {
-  display: flex;
-  gap: 10px;
-  margin-bottom: 10px;
+#container {
+    max-width: 400px;
+    margin: 0 auto;
+    padding: 20px;
+    background: white;
+    box-shadow: 0 0 10px rgba(0,0,0,0.1);
+    min-height: 100vh;
+}
+
+header h1 {
+    font-size: 1.2rem;
+    color: #0078d4;
+    border-bottom: 2px solid #0078d4;
+    padding-bottom: 10px;
+    margin-top: 0;
+}
+
+.controls {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin-bottom: 20px;
+}
+
+input[type="file"] {
+    display: none;
+}
+
+.button {
+    display: inline-block;
+    padding: 10px 20px;
+    background-color: #0078d4;
+    color: white;
+    text-align: center;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-weight: 600;
+    transition: background-color 0.2s;
+}
+
+.button:hover {
+    background-color: #005a9e;
+}
+
+.button.secondary {
+    background-color: #e1e1e1;
+    color: #333;
+}
+
+.button.secondary:hover {
+    background-color: #d1d1d1;
+}
+
+#status-container {
+    margin-bottom: 20px;
+    padding: 10px;
+    background: #f9f9f9;
+    border-radius: 4px;
+    border-left: 4px solid #0078d4;
 }
 
 #status {
-  font-size: 14px;
+    font-size: 0.9rem;
+    margin: 0;
+}
+
+#alignment-list {
+    margin-top: 15px;
+}
+
+.hidden {
+    display: none;
+}
+
+.alignment-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 5px 0;
+    font-size: 0.9rem;
+}
+
+.settings {
+    font-size: 0.85rem;
+    border-top: 1px solid #eee;
+    padding-top: 15px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.settings label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+#station-interval {
+    width: 60px;
+    padding: 4px;
+}
+
+footer {
+    margin-top: 30px;
+    font-size: 0.75rem;
+    color: #999;
+    text-align: center;
 }

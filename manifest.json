@@ -1,6 +1,6 @@
 {
-  "title": "TC Alignments",
-  "url": "https://ericjarneasbg.github.io/tc-alignments/index.html",
-  "description": "LandXML alignment viewer",
-  "enabled": true
+  "title": "Alignment Visualizer",
+  "icon": "https://img.icons8.com/color/48/000000/road.png",
+  "url": "index.html",
+  "description": "Reads LandXML and visualizes alignments with stationing in 3D."
 }
