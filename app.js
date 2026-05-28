@@ -69,7 +69,7 @@ function updateStatus(text) {
 }
 
 /**
- * Fetch files from the current project
+ * Fetch files from the current project.
  */
 async function loadProjectFiles() {
     if (!TC_API) return;
