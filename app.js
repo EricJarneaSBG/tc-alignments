@@ -4,7 +4,7 @@
 
 let TC_API = null;
 let alignments = [];
-let activeMarkupIds = []; // Single list for all managed markup IDs
+let activeMarkupIds = []; 
 
 // Initialize Trimble Connect API
 async function initTC() {
@@ -68,33 +68,25 @@ function updateStatus(text) {
     statusText.innerText = text;
 }
 
-/**
- * Robust Clear: Since batched removal by ID is inconsistent in some SDK versions,
- * we try to remove explicitly by known IDs, then fallback to a project-wide clear if available.
- */
 async function clearMarkups() {
     if (!TC_API || !TC_API.markup) return;
-    
     updateStatus("Clearing previous markups...");
-    
     try {
-        // 1. Remove by IDs we tracked
         if (activeMarkupIds.length > 0) {
             const batchSize = 100;
             for (let i = 0; i < activeMarkupIds.length; i += batchSize) {
                 const batch = activeMarkupIds.slice(i, i + batchSize);
-                // Try all common removal method names
                 if (TC_API.markup.removeMarkups) await TC_API.markup.removeMarkups(batch);
                 else if (TC_API.markup.removeLineMarkups) await TC_API.markup.removeLineMarkups(batch);
+                else if (TC_API.markup.removeLineMarkup) {
+                    for(const id of batch) await TC_API.markup.removeLineMarkup(id);
+                }
             }
         }
-
         activeMarkupIds = [];
         updateStatus("Viewer cleared.");
     } catch (e) {
         console.error("Clear failed:", e);
-        // Last resort: If multiple draws are still visible, the only way is to reload the browser extension
-        // but we'll try to keep the session alive first.
     }
 }
 
@@ -200,7 +192,6 @@ async function drawSelectedAlignments() {
                 if (pluralFn) result = await pluralFn.call(TC_API.markup, batch);
                 else if (singularFn) result = await singularFn.call(TC_API.markup, batch);
 
-                // Force extract IDs to ensure we can clear them later
                 if (Array.isArray(result)) {
                     result.forEach(r => {
                         if (r && r.id) activeMarkupIds.push(r.id);
@@ -223,6 +214,9 @@ async function drawSelectedAlignments() {
     }
 }
 
+/**
+ * Formats station to engineering format: KM X+YYY.ZZZ
+ */
 function formatStation(s) {
     const km = Math.floor(s / 1000);
     const m = (s % 1000).toFixed(3);
@@ -236,6 +230,10 @@ function processAlignment(align, settings) {
     const texts = [];
     const points = [];
     const toMM = 1000;
+
+    // Use slider value to define "physical height" of the text (distance between start and end)
+    // We scale the 6-30 value to a 0.5m - 5m range
+    const textHeightM = (settings.fontSize / 10) * 1.5;
 
     const coordGeom = align.node.getElementsByTagName('CoordGeom')[0];
     if (!coordGeom) return { lines, texts };
@@ -325,12 +323,13 @@ function processAlignment(align, settings) {
             const pos = { positionX: p.x * toMM, positionY: p.y * toMM, positionZ: el * toMM };
 
             if (settings.drawText) {
+                const isExtreme = (s === startSta || s === endSta);
                 texts.push({
-                    text: s === startSta ? `START KM ${formatStation(s)}` : (s === endSta ? `END KM ${formatStation(s)}` : `KM ${formatStation(s)}`),
-                    color: { r: 0, g: 255, b: 255, a: 1 },
-                    fontSize: settings.fontSize,
+                    text: isExtreme ? (s === startSta ? `START KM ${formatStation(s)}` : `END KM ${formatStation(s)}`) : `KM ${formatStation(s)}`,
+                    color: isExtreme ? { r: 255, g: 100, b: 0, a: 1 } : { r: 0, g: 255, b: 255, a: 1 },
                     start: pos,
-                    end: { ...pos, positionZ: (el + 1.2) * toMM }
+                    // The distance between start and end defines the physical height/scale in many 3D viewers
+                    end: { ...pos, positionZ: (el + textHeightM) * toMM }
                 });
             }
 
@@ -340,9 +339,10 @@ function processAlignment(align, settings) {
                     const dx = pN.x - p.x, dy = pN.y - p.y;
                     const l = Math.sqrt(dx*dx + dy*dy);
                     if (l > 0.0001) {
-                        const nx = -dy/l, ny = dx/l, tL = 0.8;
+                        const nx = -dy/l, ny = dx/l;
+                        const tL = (s === startSta || s === endSta) ? 1.5 : 0.8; // Longer ticks for start/end
                         lines.push({
-                            color: { r: 0, g: 255, b: 255, a: 1 },
+                            color: (s === startSta || s === endSta) ? { r: 255, g: 100, b: 0, a: 1 } : { r: 0, g: 255, b: 255, a: 1 },
                             start: { positionX: (p.x - nx*tL)*toMM, positionY: (p.y - ny*tL)*toMM, positionZ: el*toMM },
                             end: { positionX: (p.x + nx*tL)*toMM, positionY: (p.y + ny*tL)*toMM, positionZ: el*toMM }
                         });
