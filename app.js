@@ -5,7 +5,7 @@
 let TC_API = null;
 let alignments = [];
 let activeMarkupIds = []; 
-let idCounter = 1; // Global counter to ensure unique IDs
+let idCounter = 1; 
 
 // Initialize Trimble Connect API
 async function initTC() {
@@ -50,22 +50,17 @@ const drawAlignmentsCheck = document.getElementById('draw-alignments');
 const drawStationingCheck = document.getElementById('draw-stationing');
 const drawTextCheck = document.getElementById('draw-text');
 const stationIntervalInput = document.getElementById('station-interval');
-const fontSizeSlider = document.getElementById('font-size-slider');
-const fontSizeVal = document.getElementById('font-size-val');
 
 // Event Listeners
 fileInput.addEventListener('change', handleFileSelect);
 drawBtn.addEventListener('click', async () => {
-    updateStatus("Clearing previous and drawing...");
+    updateStatus("Preparing viewer...");
     await clearMarkups();
-    // Small delay to ensure clear command is processed by viewer
+    // Tiny delay to ensure removal is processed
     await new Promise(r => setTimeout(r, 200)); 
     await drawSelectedAlignments();
 });
 clearBtn.addEventListener('click', clearMarkups);
-fontSizeSlider.addEventListener('input', () => {
-    fontSizeVal.innerText = fontSizeSlider.value;
-});
 
 function updateStatus(text) {
     statusText.innerText = text;
@@ -79,9 +74,10 @@ async function clearMarkups() {
         return;
     }
 
+    updateStatus("Clearing previous markups...");
+    
     try {
         const batchSize = 100;
-        // Try multiple methods for maximum compatibility
         const removeFn = TC_API.markup.removeMarkups || TC_API.markup.removeLineMarkups;
         
         if (removeFn) {
@@ -95,12 +91,11 @@ async function clearMarkups() {
             }
         }
         
-        console.log(`Cleared ${activeMarkupIds.length} markups.`);
         activeMarkupIds = [];
         updateStatus("Viewer cleared.");
     } catch (e) {
         console.error("Clear failed:", e);
-        activeMarkupIds = []; // Reset anyway to prevent infinite loops
+        activeMarkupIds = []; 
     }
 }
 
@@ -168,7 +163,7 @@ function parseLandXML(xmlText) {
 
 async function drawSelectedAlignments() {
     if (!TC_API) return;
-    
+
     const selectedIds = Array.from(listItems.querySelectorAll('input:checked')).map(cb => parseInt(cb.value));
     if (selectedIds.length === 0) {
         alert("Please select at least one alignment.");
@@ -180,23 +175,22 @@ async function drawSelectedAlignments() {
         drawSta: drawStationingCheck.checked,
         drawText: drawTextCheck.checked,
         interval: parseFloat(stationIntervalInput.value) || 100,
-        fontSize: parseInt(fontSizeSlider.value) || 10,
         swap: true 
     };
 
     updateStatus("Generating geometry...");
     
-    const lines = [];
-    const texts = [];
+    const lineMarkups = [];
+    const textMarkups = [];
 
     for (const id of selectedIds) {
         const align = alignments[id];
         const geom = processAlignment(align, settings);
-        lines.push(...geom.lines);
-        texts.push(...geom.texts);
+        lineMarkups.push(...geom.lines);
+        textMarkups.push(...geom.texts);
     }
 
-    updateStatus(`Drawing ${lines.length + texts.length} elements...`);
+    updateStatus(`Drawing ${lineMarkups.length + textMarkups.length} elements...`);
 
     try {
         const batchSize = 50;
@@ -204,21 +198,19 @@ async function drawSelectedAlignments() {
         const addItems = async (items, singularFn, pluralFn) => {
             for (let i = 0; i < items.length; i += batchSize) {
                 const batch = items.slice(i, i + batchSize);
-                // We pass explicit IDs, so we know exactly what to clear later
                 if (pluralFn) await pluralFn.call(TC_API.markup, batch);
                 else if (singularFn) {
                     for (const item of batch) await singularFn.call(TC_API.markup, item);
                 }
                 
-                // Track the IDs we just sent
                 batch.forEach(item => {
                     if (item.id) activeMarkupIds.push(item.id);
                 });
             }
         };
 
-        if (lines.length > 0) await addItems(lines, TC_API.markup.addLineMarkup, TC_API.markup.addLineMarkups);
-        if (texts.length > 0) await addItems(texts, TC_API.markup.addTextMarkup, TC_API.markup.addTextMarkups);
+        if (lineMarkups.length > 0) await addItems(lineMarkups, TC_API.markup.addLineMarkup, TC_API.markup.addLineMarkups);
+        if (textMarkups.length > 0) await addItems(textMarkups, TC_API.markup.addTextMarkup, TC_API.markup.addTextMarkups);
 
         updateStatus("Drawing complete.");
     } catch (e) {
@@ -240,6 +232,7 @@ function processAlignment(align, settings) {
     const texts = [];
     const points = [];
     const toMM = 1000;
+    const labelHeightM = 1.5;
 
     const coordGeom = align.node.getElementsByTagName('CoordGeom')[0];
     if (!coordGeom) return { lines, texts };
@@ -331,18 +324,12 @@ function processAlignment(align, settings) {
 
             if (settings.drawText) {
                 const isExtreme = (s === startSta || s === endSta);
-                // Attempt all candidate names for font size to see which one the viewer respects
                 texts.push({
                     id: idCounter++,
                     text: isExtreme ? (s === startSta ? `START KM ${formatStation(s)}` : `END KM ${formatStation(s)}`) : `KM ${formatStation(s)}`,
                     color: isExtreme ? { r: 255, g: 100, b: 0, a: 1 } : { r: 0, g: 255, b: 255, a: 1 },
                     start: pos,
-                    end: { ...pos, positionZ: (el + 1.5) * toMM },
-                    // Property candidates:
-                    fontSize: settings.fontSize,
-                    fontHeight: settings.fontSize,
-                    size: settings.fontSize,
-                    scale: settings.fontSize / 10
+                    end: { ...pos, positionZ: (el + labelHeightM) * toMM }
                 });
             }
 
@@ -352,8 +339,7 @@ function processAlignment(align, settings) {
                     const dx = pN.x - p.x, dy = pN.y - p.y;
                     const l = Math.sqrt(dx*dx + dy*dy);
                     if (l > 0.0001) {
-                        const nx = -dy/l, ny = dx/l;
-                        const tL = (s === startSta || s === endSta) ? 1.5 : 0.8; 
+                        const nx = -dy/l, ny = dx/l, tL = (s === startSta || s === endSta) ? 1.5 : 0.8;
                         lines.push({
                             id: idCounter++,
                             color: (s === startSta || s === endSta) ? { r: 255, g: 100, b: 0, a: 1 } : { r: 0, g: 255, b: 255, a: 1 },
