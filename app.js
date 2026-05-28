@@ -4,7 +4,7 @@
 
 let TC_API = null;
 let alignments = [];
-let markupIds = { lines: [], texts: [] };
+let activeMarkupIds = []; // Single list for all managed markup IDs
 
 // Initialize Trimble Connect API
 async function initTC() {
@@ -49,60 +49,52 @@ const drawAlignmentsCheck = document.getElementById('draw-alignments');
 const drawStationingCheck = document.getElementById('draw-stationing');
 const drawTextCheck = document.getElementById('draw-text');
 const stationIntervalInput = document.getElementById('station-interval');
+const fontSizeSlider = document.getElementById('font-size-slider');
+const fontSizeVal = document.getElementById('font-size-val');
 
 // Event Listeners
 fileInput.addEventListener('change', handleFileSelect);
 drawBtn.addEventListener('click', async () => {
-    // Force a clear before redrawing
+    updateStatus("Preparing viewer...");
     await clearMarkups();
     await drawSelectedAlignments();
 });
 clearBtn.addEventListener('click', clearMarkups);
+fontSizeSlider.addEventListener('input', () => {
+    fontSizeVal.innerText = fontSizeSlider.value;
+});
 
 function updateStatus(text) {
     statusText.innerText = text;
 }
 
+/**
+ * Robust Clear: Since batched removal by ID is inconsistent in some SDK versions,
+ * we try to remove explicitly by known IDs, then fallback to a project-wide clear if available.
+ */
 async function clearMarkups() {
-    if (!TC_API || !TC_API.markup) {
-        console.warn("API not ready for clearing.");
-        return;
-    }
-
-    if (markupIds.lines.length === 0 && markupIds.texts.length === 0) {
-        console.log("Nothing to clear.");
-        return;
-    }
-
-    updateStatus("Clearing viewer...");
+    if (!TC_API || !TC_API.markup) return;
+    
+    updateStatus("Clearing previous markups...");
     
     try {
-        const batchSize = 100;
-        
-        // Helper to remove in batches
-        const removeBatch = async (ids, removeFnName) => {
-            const removeFn = TC_API.markup[removeFnName];
-            if (!removeFn || ids.length === 0) return;
-            
-            for (let i = 0; i < ids.length; i += batchSize) {
-                const batch = ids.slice(i, i + batchSize);
-                try {
-                    await removeFn.call(TC_API.markup, batch);
-                } catch (e) {
-                    console.warn(`Error removing batch from ${removeFnName}:`, e);
-                }
+        // 1. Remove by IDs we tracked
+        if (activeMarkupIds.length > 0) {
+            const batchSize = 100;
+            for (let i = 0; i < activeMarkupIds.length; i += batchSize) {
+                const batch = activeMarkupIds.slice(i, i + batchSize);
+                // Try all common removal method names
+                if (TC_API.markup.removeMarkups) await TC_API.markup.removeMarkups(batch);
+                else if (TC_API.markup.removeLineMarkups) await TC_API.markup.removeLineMarkups(batch);
             }
-        };
+        }
 
-        await removeBatch(markupIds.lines, 'removeLineMarkups');
-        await removeBatch(markupIds.texts, 'removeTextMarkups');
-
-        markupIds = { lines: [], texts: [] };
+        activeMarkupIds = [];
         updateStatus("Viewer cleared.");
     } catch (e) {
-        console.error("Critical error clearing markups:", e);
-        updateStatus("Clear failed. Refreshing page as fallback...");
-        setTimeout(() => location.reload(), 1000);
+        console.error("Clear failed:", e);
+        // Last resort: If multiple draws are still visible, the only way is to reload the browser extension
+        // but we'll try to keep the session alive first.
     }
 }
 
@@ -169,11 +161,6 @@ function parseLandXML(xmlText) {
 }
 
 async function drawSelectedAlignments() {
-    if (!TC_API) {
-        alert("Not connected to Trimble Connect.");
-        return;
-    }
-
     const selectedIds = Array.from(listItems.querySelectorAll('input:checked')).map(cb => parseInt(cb.value));
     if (selectedIds.length === 0) {
         alert("Please select at least one alignment.");
@@ -185,63 +172,53 @@ async function drawSelectedAlignments() {
         drawSta: drawStationingCheck.checked,
         drawText: drawTextCheck.checked,
         interval: parseFloat(stationIntervalInput.value) || 100,
+        fontSize: parseInt(fontSizeSlider.value) || 10,
         swap: true 
     };
 
     updateStatus("Generating geometry...");
     
-    const lineMarkups = [];
-    const textMarkups = [];
+    const lines = [];
+    const texts = [];
 
     for (const id of selectedIds) {
         const align = alignments[id];
         const geom = processAlignment(align, settings);
-        lineMarkups.push(...geom.lines);
-        textMarkups.push(...geom.texts);
+        lines.push(...geom.lines);
+        texts.push(...geom.texts);
     }
 
-    updateStatus(`Drawing ${lineMarkups.length} lines and ${textMarkups.length} labels...`);
+    updateStatus(`Drawing ${lines.length + texts.length} elements...`);
 
     try {
-        const batchSize = 50; 
+        const batchSize = 40;
         
-        const addBatch = async (items, singularFnName, pluralFnName, type) => {
-            if (items.length === 0) return;
-            const pluralFn = TC_API.markup[pluralFnName];
-            const singularFn = TC_API.markup[singularFnName];
-
+        const addItems = async (items, singularFn, pluralFn) => {
             for (let i = 0; i < items.length; i += batchSize) {
                 const batch = items.slice(i, i + batchSize);
-                try {
-                    let result;
-                    if (pluralFn) {
-                        result = await pluralFn.call(TC_API.markup, batch);
-                    } else if (singularFn) {
-                        result = await singularFn.call(TC_API.markup, batch);
-                    }
-                    
-                    // Track IDs from result
-                    if (Array.isArray(result)) {
-                        result.forEach(m => {
-                            if (typeof m === 'object' && m.id) markupIds[type].push(m.id);
-                            else if (typeof m === 'number' || typeof m === 'string') markupIds[type].push(m);
-                        });
-                    } else if (result) {
-                        if (result.id) markupIds[type].push(result.id);
-                        else if (typeof result === 'number' || typeof result === 'string') markupIds[type].push(result);
-                    }
-                } catch (err) {
-                    console.warn(`Add error in ${pluralFnName}:`, err);
+                let result;
+                if (pluralFn) result = await pluralFn.call(TC_API.markup, batch);
+                else if (singularFn) result = await singularFn.call(TC_API.markup, batch);
+
+                // Force extract IDs to ensure we can clear them later
+                if (Array.isArray(result)) {
+                    result.forEach(r => {
+                        if (r && r.id) activeMarkupIds.push(r.id);
+                        else if (typeof r === 'string' || typeof r === 'number') activeMarkupIds.push(r);
+                    });
+                } else if (result) {
+                    if (result.id) activeMarkupIds.push(result.id);
+                    else if (typeof result === 'string' || typeof result === 'number') activeMarkupIds.push(result);
                 }
             }
         };
 
-        await addBatch(lineMarkups, 'addLineMarkup', 'addLineMarkups', 'lines');
-        await addBatch(textMarkups, 'addTextMarkup', 'addTextMarkups', 'texts');
+        if (lines.length > 0) await addItems(lines, TC_API.markup.addLineMarkup, TC_API.markup.addLineMarkups);
+        if (texts.length > 0) await addItems(texts, TC_API.markup.addTextMarkup, TC_API.markup.addTextMarkups);
 
         updateStatus("Drawing complete.");
     } catch (e) {
-        console.error("Error drawing markups:", e);
+        console.error("Draw error:", e);
         updateStatus("Error: " + e.message);
     }
 }
@@ -266,49 +243,33 @@ function processAlignment(align, settings) {
     const children = coordGeom.children;
     for (const child of children) {
         if (child.tagName === 'Line') {
-            const startNode = child.getElementsByTagName('Start')[0];
-            const endNode = child.getElementsByTagName('End')[0];
-            if (!startNode || !endNode) continue;
-            
-            const start = parseCoord(startNode.textContent, settings.swap);
-            const end = parseCoord(endNode.textContent, settings.swap);
+            const start = parseCoord(child.getElementsByTagName('Start')[0]?.textContent, settings.swap);
+            const end = parseCoord(child.getElementsByTagName('End')[0]?.textContent, settings.swap);
             const staStart = parseFloat(child.getAttribute('staStart'));
             const length = parseFloat(child.getAttribute('length'));
-            
-            if (isValidPoint(start) && isValidPoint(end)) {
-                points.push({ x: start.x, y: start.y, sta: staStart });
-                points.push({ x: end.x, y: end.y, sta: staStart + length });
+            if (isValid(start) && isValid(end)) {
+                points.push({ ...start, sta: staStart });
+                points.push({ ...end, sta: staStart + length });
             }
         } else if (child.tagName === 'Curve') {
-            const startNode = child.getElementsByTagName('Start')[0];
-            const centerNode = child.getElementsByTagName('Center')[0];
-            const endNode = child.getElementsByTagName('End')[0];
-            if (!startNode || !centerNode || !endNode) continue;
-
-            const start = parseCoord(startNode.textContent, settings.swap);
-            const center = parseCoord(centerNode.textContent, settings.swap);
-            const end = parseCoord(endNode.textContent, settings.swap);
+            const start = parseCoord(child.getElementsByTagName('Start')[0]?.textContent, settings.swap);
+            const center = parseCoord(child.getElementsByTagName('Center')[0]?.textContent, settings.swap);
+            const end = parseCoord(child.getElementsByTagName('End')[0]?.textContent, settings.swap);
             const staStart = parseFloat(child.getAttribute('staStart'));
             const length = parseFloat(child.getAttribute('length'));
             const radius = parseFloat(child.getAttribute('radius'));
             const rot = child.getAttribute('rot');
 
-            if (isValidPoint(start) && isValidPoint(center) && isValidPoint(end)) {
-                const segments = Math.max(2, Math.ceil(length / 10)); 
-                const startAngle = Math.atan2(start.y - center.y, start.x - center.x);
-                let endAngle = Math.atan2(end.y - center.y, end.x - center.x);
-
-                if (rot === 'cw' && endAngle > startAngle) endAngle -= 2 * Math.PI;
-                if (rot === 'ccw' && endAngle < startAngle) endAngle += 2 * Math.PI;
-
-                for (let i = 0; i <= segments; i++) {
-                    const t = i / segments;
-                    const angle = startAngle + t * (endAngle - startAngle);
-                    points.push({
-                        x: center.x + radius * Math.cos(angle),
-                        y: center.y + radius * Math.sin(angle),
-                        sta: staStart + t * length
-                    });
+            if (isValid(start) && isValid(center) && isValid(end)) {
+                const segs = Math.max(2, Math.ceil(length / 10));
+                const sAng = Math.atan2(start.y - center.y, start.x - center.x);
+                let eAng = Math.atan2(end.y - center.y, end.x - center.x);
+                if (rot === 'cw' && eAng > sAng) eAng -= 2 * Math.PI;
+                if (rot === 'ccw' && eAng < sAng) eAng += 2 * Math.PI;
+                for (let i = 0; i <= segs; i++) {
+                    const t = i / segs;
+                    const a = sAng + t * (eAng - sAng);
+                    points.push({ x: center.x + radius * Math.cos(a), y: center.y + radius * Math.sin(a), sta: staStart + t * length });
                 }
             }
         }
@@ -319,21 +280,17 @@ function processAlignment(align, settings) {
         const pviNodes = align.profile.getElementsByTagName('PVI');
         for (let i = 0; i < pviNodes.length; i++) {
             const parts = pviNodes[i].textContent.trim().split(/\s+/);
-            if (parts.length >= 2) {
-                const sVal = parseFloat(parts[0]);
-                const eVal = parseFloat(parts[1]);
-                if (!isNaN(sVal) && !isNaN(eVal)) pvis.push({ sta: sVal, elev: eVal });
-            }
+            if (parts.length >= 2) pvis.push({ sta: parseFloat(parts[0]), elev: parseFloat(parts[1]) });
         }
     }
 
-    const getElevation = (sta) => {
-        if (pvis.length === 0) return 0;
-        if (sta <= pvis[0].sta) return pvis[0].elev;
-        if (sta >= pvis[pvis.length - 1].sta) return pvis[pvis.length - 1].elev;
+    const getElev = (s) => {
+        if (!pvis.length) return 0;
+        if (s <= pvis[0].sta) return pvis[0].elev;
+        if (s >= pvis[pvis.length-1].sta) return pvis[pvis.length-1].elev;
         for (let i = 0; i < pvis.length - 1; i++) {
-            if (sta >= pvis[i].sta && sta <= pvis[i+1].sta) {
-                const t = (sta - pvis[i].sta) / (pvis[i+1].sta - pvis[i].sta);
+            if (s >= pvis[i].sta && s <= pvis[i+1].sta) {
+                const t = (s - pvis[i].sta) / (pvis[i+1].sta - pvis[i].sta);
                 return pvis[i].elev + t * (pvis[i+1].elev - pvis[i].elev);
             }
         }
@@ -342,20 +299,19 @@ function processAlignment(align, settings) {
 
     if (settings.drawAlign) {
         for (let i = 0; i < points.length - 1; i++) {
-            const p1 = points[i];
-            const p2 = points[i+1];
-            if (Math.abs(p1.x - p2.x) < 0.001 && Math.abs(p1.y - p2.y) < 0.001) continue;
+            const p1 = points[i], p2 = points[i+1];
+            if (dist(p1, p2) < 0.001) continue;
             lines.push({
                 color: { r: 255, g: 255, b: 0, a: 1 },
-                start: { positionX: p1.x * toMM, positionY: p1.y * toMM, positionZ: getElevation(p1.sta) * toMM },
-                end: { positionX: p2.x * toMM, positionY: p2.y * toMM, positionZ: getElevation(p2.sta) * toMM }
+                start: { positionX: p1.x * toMM, positionY: p1.y * toMM, positionZ: getElev(p1.sta) * toMM },
+                end: { positionX: p2.x * toMM, positionY: p2.y * toMM, positionZ: getElev(p2.sta) * toMM }
             });
         }
     }
 
     if (settings.drawSta || settings.drawText) {
         const startSta = points[0]?.sta || 0;
-        const endSta = points[points.length - 1]?.sta || 0;
+        const endSta = points[points.length-1]?.sta || 0;
         const stations = [startSta];
         for (let s = Math.ceil(startSta / settings.interval) * settings.interval; s < endSta; s += settings.interval) {
             if (s > startSta + 0.01) stations.push(s);
@@ -363,35 +319,32 @@ function processAlignment(align, settings) {
         if (endSta > startSta + 0.01) stations.push(endSta);
 
         for (const s of stations) {
-            const p = interpolateHorizontal(points, s);
+            const p = interpolate(points, s);
             if (!p) continue;
-            const elev = getElevation(s);
-            const pos = { positionX: p.x * toMM, positionY: p.y * toMM, positionZ: elev * toMM };
+            const el = getElev(s);
+            const pos = { positionX: p.x * toMM, positionY: p.y * toMM, positionZ: el * toMM };
 
             if (settings.drawText) {
                 texts.push({
-                    text: s === startSta ? `START KM ${ formatStation(s) }` : (s === endSta ? `END KM ${ formatStation(s) }` : `KM ${ formatStation(s) }`),
+                    text: s === startSta ? `START KM ${formatStation(s)}` : (s === endSta ? `END KM ${formatStation(s)}` : `KM ${formatStation(s)}`),
                     color: { r: 0, g: 255, b: 255, a: 1 },
-                    fontSize: 10, 
+                    fontSize: settings.fontSize,
                     start: pos,
-                    end: { ...pos, positionZ: (elev + 1.2) * toMM } 
+                    end: { ...pos, positionZ: (el + 1.2) * toMM }
                 });
             }
 
             if (settings.drawSta) {
-                const pNext = interpolateHorizontal(points, s + 0.1) || interpolateHorizontal(points, s - 0.1);
-                if (pNext) {
-                    const dx = pNext.x - p.x;
-                    const dy = pNext.y - p.y;
-                    const len = Math.sqrt(dx*dx + dy*dy);
-                    if (len > 0.0001) {
-                        const nx = -dy / len;
-                        const ny = dx / len;
-                        const tickLen = 0.8; 
+                const pN = interpolate(points, s + 0.1) || interpolate(points, s - 0.1);
+                if (pN) {
+                    const dx = pN.x - p.x, dy = pN.y - p.y;
+                    const l = Math.sqrt(dx*dx + dy*dy);
+                    if (l > 0.0001) {
+                        const nx = -dy/l, ny = dx/l, tL = 0.8;
                         lines.push({
                             color: { r: 0, g: 255, b: 255, a: 1 },
-                            start: { positionX: (p.x - nx * tickLen) * toMM, positionY: (p.y - ny * tickLen) * toMM, positionZ: elev * toMM },
-                            end: { positionX: (p.x + nx * tickLen) * toMM, positionY: (p.y + ny * tickLen) * toMM, positionZ: elev * toMM }
+                            start: { positionX: (p.x - nx*tL)*toMM, positionY: (p.y - ny*tL)*toMM, positionZ: el*toMM },
+                            end: { positionX: (p.x + nx*tL)*toMM, positionY: (p.y + ny*tL)*toMM, positionZ: el*toMM }
                         });
                     }
                 }
@@ -401,31 +354,22 @@ function processAlignment(align, settings) {
     return { lines, texts };
 }
 
-function isValidPoint(p) {
-    return p && !isNaN(p.x) && !isNaN(p.y) && isFinite(p.x) && isFinite(p.y);
-}
-
+function isValid(p) { return p && !isNaN(p.x) && !isNaN(p.y); }
+function dist(p1, p2) { return Math.sqrt(Math.pow(p1.x-p2.x, 2) + Math.pow(p1.y-p2.y, 2)); }
 function parseCoord(str, swap) {
-    if (!str) return { x: 0, y: 0 };
-    const parts = str.trim().split(/\s+/);
-    const v1 = parseFloat(parts[0]);
-    const v2 = parseFloat(parts[1]);
-    if (isNaN(v1) || isNaN(v2)) return { x: 0, y: 0 };
+    if (!str) return null;
+    const pts = str.trim().split(/\s+/);
+    const v1 = parseFloat(pts[0]), v2 = parseFloat(pts[1]);
     return swap ? { x: v2, y: v1 } : { x: v1, y: v2 };
 }
-
-function interpolateHorizontal(points, sta) {
-    if (points.length === 0) return null;
-    if (sta <= points[0].sta + 0.001) return points[0];
-    if (sta >= points[points.length - 1].sta - 0.001) return points[points.length - 1];
-    for (let i = 0; i < points.length - 1; i++) {
-        if (sta >= points[i].sta && sta <= points[i+1].sta) {
-            const t = (sta - points[i].sta) / (points[i+1].sta - points[i].sta);
-            if (isNaN(t) || !isFinite(t)) return points[i];
-            return {
-                x: points[i].x + t * (points[i+1].x - points[i].x),
-                y: points[i].y + t * (points[i+1].y - points[i].y)
-            };
+function interpolate(pts, s) {
+    if (!pts.length) return null;
+    if (s <= pts[0].sta + 0.001) return pts[0];
+    if (s >= pts[pts.length-1].sta - 0.001) return pts[pts.length-1];
+    for (let i = 0; i < pts.length - 1; i++) {
+        if (s >= pts[i].sta && s <= pts[i+1].sta) {
+            const t = (s - pts[i].sta) / (pts[i+1].sta - pts[i].sta);
+            return { x: pts[i].x + t*(pts[i+1].x-pts[i].x), y: pts[i].y + t*(pts[i+1].y-pts[i].y) };
         }
     }
     return null;
