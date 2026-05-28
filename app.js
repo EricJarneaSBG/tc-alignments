@@ -83,16 +83,16 @@ async function loadProjectFiles() {
         
         console.log("Current Project Data:", project);
 
-        // Use rootFolderId if available, otherwise fallback to project.id
-        const folderId = project.rootFolderId || project.id;
-        
-        // Determine API Base URL safely
-        const referrer = document.referrer || "";
+        // Determine API Base URL using project.location
         let baseUrl = "https://app.connect.trimble.com/tc/api/2.0";
-        if (referrer.includes("app21")) baseUrl = "https://app21.connect.trimble.com/tc/api/2.0";
-        else if (referrer.includes("app31")) baseUrl = "https://app31.connect.trimble.com/tc/api/2.0";
+        if (project.location === "europe" || project.location === "europe-west") {
+            baseUrl = "https://app21.connect.trimble.com/tc/api/2.0";
+        } else if (project.location === "asia" || project.location === "asia-pacific") {
+            baseUrl = "https://app31.connect.trimble.com/tc/api/2.0";
+        }
 
-        console.log(`Fetching items for folder ${folderId} from ${baseUrl}`);
+        console.log(`Region: ${project.location}. Using API: ${baseUrl}`);
+        const folderId = project.id; // Root folder ID is the Project ID in 2.0 API
 
         // Root folder ID is the same as project ID in many cases, but rootFolderId is more explicit
         const response = await fetch(`${baseUrl}/folders/${folderId}/items`, {
