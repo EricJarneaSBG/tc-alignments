@@ -97,42 +97,41 @@ async function loadProjectFiles() {
     projectFilesDropdown.innerHTML = '<option value="">-- Loading... --</option>';
 
     try {
-        const projectInfo = await TC_API.project.getProject();
+        const project = await TC_API.project.getProject();
         const token = await TC_API.extension.requestPermission("accesstoken");
         
-        console.log("Workspace Project Data:", projectInfo);
+        console.log("Current Project Data:", project);
 
-        const referrer = document.referrer || "";
-        let hostApiUrl = "https://app.connect.trimble.com/tc/api/2.0";
-        if (referrer.includes("app21")) hostApiUrl = "https://app21.connect.trimble.com/tc/api/2.0";
-        if (referrer.includes("app31")) hostApiUrl = "https://app31.connect.trimble.com/tc/api/2.0";
-
-        console.log("Using Host API:", hostApiUrl);
-
-        const projectResp = await fetch(`${hostApiUrl}/projects/${projectInfo.id}`, {
-            headers: { 
-                'Authorization': `Bearer ${token}`
-            }
-        });
-
-        if (!projectResp.ok) {
-            throw new Error(`Project Discovery Failed: ${projectResp.status}`);
+        // Determine API Base URL based on project location metadata
+        let baseUrl = "https://app.connect.trimble.com/tc/api/2.0";
+        if (project.location === "europe" || project.location === "europe-west") {
+            baseUrl = "https://app21.connect.trimble.com/tc/api/2.0";
+        } else if (project.location === "asia" || project.location === "asia-pacific") {
+            baseUrl = "https://app31.connect.trimble.com/tc/api/2.0";
         }
 
-        const projectData = await projectResp.json();
-        console.log("REST Project Discovery Data:", projectData);
+        console.log(`Region: ${project.location}. Using API: ${baseUrl}`);
 
-        const folderId = projectData.rootFolderId || projectData.id;
-        console.log(`Using Folder ID: ${folderId}`);
+        // Try Project Discovery first to get rootFolderId
+        const discResp = await fetch(`${baseUrl}/projects/${project.id}`, {
+            headers: { 'Authorization': `Bearer ${token}` }
+        });
+        
+        let folderId = project.id;
+        if (discResp.ok) {
+            const discData = await discResp.json();
+            folderId = discData.rootFolderId || project.id;
+        }
 
-        const response = await fetch(`${hostApiUrl}/folders/${folderId}/items`, {
+        // Fetch items in the root folder
+        const response = await fetch(`${baseUrl}/folders/${folderId}/items`, {
             headers: { 
                 'Authorization': `Bearer ${token}`,
-                'Range': 'items=0-100'
+                'Range': 'items=0-200' 
             }
         });
 
-        if (!response.ok) throw new Error(`Folder API Error: ${response.status}`);
+        if (!response.ok) throw new Error(`API Error: ${response.status}`);
 
         const items = await response.json();
         const landXmlFiles = items.filter(i => i.type === 'FILE' && (i.name.toLowerCase().endsWith('.xml') || i.name.toLowerCase().endsWith('.landxml')));
@@ -142,7 +141,7 @@ async function loadProjectFiles() {
             const opt = document.createElement('option');
             opt.value = file.id;
             opt.textContent = file.name;
-            opt.dataset.baseUrl = hostApiUrl; 
+            opt.dataset.baseUrl = baseUrl;
             projectFilesDropdown.appendChild(opt);
         });
 
