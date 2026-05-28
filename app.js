@@ -8,13 +8,33 @@ let alignments = [];
 // Initialize Trimble Connect API
 async function initTC() {
     try {
-        TC_API = await WorkspaceAPI.connect(window.parent, (event, data) => {
+        // Find the global object (can be TrimbleConnectWorkspace or TrimbleConnectWorkspaceApi)
+        const getApi = () => (typeof TrimbleConnectWorkspace !== 'undefined' ? TrimbleConnectWorkspace : 
+                             (typeof TrimbleConnectWorkspaceApi !== 'undefined' ? TrimbleConnectWorkspaceApi : undefined));
+
+        // Wait for global object to be available just in case
+        if (!getApi()) {
+            console.log("Waiting for SDK...");
+            let attempts = 0;
+            while (!getApi() && attempts < 50) {
+                await new Promise(r => setTimeout(r, 100));
+                attempts++;
+            }
+        }
+
+        const ApiObject = getApi();
+        if (!ApiObject) {
+            throw new Error("Trimble Connect SDK script not loaded.");
+        }
+
+        TC_API = await ApiObject.connect(window.parent, (event, data) => {
             console.log("TC Event:", event, data);
-        });
+        }, 30000); // 30s timeout
+        
         updateStatus("Connected to Trimble Connect.");
     } catch (e) {
         console.error("Failed to connect to TC:", e);
-        updateStatus("Error: Could not connect to Trimble Connect. Are you running this as an extension?");
+        updateStatus("Error: Could not connect to Trimble Connect. (" + e.message + ")");
     }
 }
 
