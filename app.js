@@ -102,55 +102,71 @@ async function loadProjectFiles() {
         
         console.log("Current Project Data:", project);
 
-        // Determine API Base URL based on project location metadata
-        let baseUrl = "https://app.connect.trimble.com/tc/api/2.0";
+        const endpoints = [
+            "https://app.connect.trimble.com/tc/api/2.0",
+            "https://app21.connect.trimble.com/tc/api/2.0"
+        ];
+
+        // If we know it's Europe, prioritize app21
         if (project.location === "europe" || project.location === "europe-west") {
-            baseUrl = "https://app21.connect.trimble.com/tc/api/2.0";
-        } else if (project.location === "asia" || project.location === "asia-pacific") {
-            baseUrl = "https://app31.connect.trimble.com/tc/api/2.0";
+            endpoints.reverse();
         }
 
-        console.log(`Region: ${project.location}. Using API: ${baseUrl}`);
+        let success = false;
+        let lastError = "";
 
-        // Try Project Discovery first to get rootFolderId
-        const discResp = await fetch(`${baseUrl}/projects/${project.id}`, {
-            headers: { 'Authorization': `Bearer ${token}` }
-        });
-        
-        let folderId = project.id;
-        if (discResp.ok) {
-            const discData = await discResp.json();
-            folderId = discData.rootFolderId || project.id;
-        }
+        for (const baseUrl of endpoints) {
+            console.log(`Attempting fetch from: ${baseUrl}`);
+            try {
+                // 1. Try to get folder items directly using project ID
+                const response = await fetch(`${baseUrl}/folders/${project.id}/items`, {
+                    headers: { 
+                        'Authorization': `Bearer ${token}`,
+                        'Range': 'items=0-200' 
+                    }
+                });
 
-        // Fetch items in the root folder
-        const response = await fetch(`${baseUrl}/folders/${folderId}/items`, {
-            headers: { 
-                'Authorization': `Bearer ${token}`,
-                'Range': 'items=0-200' 
+                if (response.ok) {
+                    const items = await response.json();
+                    processFetchedItems(items, baseUrl);
+                    success = true;
+                    break;
+                } else {
+                    const errBody = await response.text();
+                    console.warn(`Fetch failed from ${baseUrl}: ${response.status} - ${errBody}`);
+                    lastError = `API ${response.status}: ${errBody}`;
+                }
+            } catch (e) {
+                console.warn(`Fetch error from ${baseUrl}:`, e);
+                lastError = e.message;
             }
-        });
+        }
 
-        if (!response.ok) throw new Error(`API Error: ${response.status}`);
+        if (!success) {
+            throw new Error(`Could not access project files. Last error: ${lastError}`);
+        }
 
-        const items = await response.json();
-        const landXmlFiles = items.filter(i => i.type === 'FILE' && (i.name.toLowerCase().endsWith('.xml') || i.name.toLowerCase().endsWith('.landxml')));
-
-        projectFilesDropdown.innerHTML = '<option value="">-- Select LandXML --</option>';
-        landXmlFiles.forEach(file => {
-            const opt = document.createElement('option');
-            opt.value = file.id;
-            opt.textContent = file.name;
-            opt.dataset.baseUrl = baseUrl;
-            projectFilesDropdown.appendChild(opt);
-        });
-
-        updateStatus(`Found ${landXmlFiles.length} LandXML files.`);
     } catch (e) {
         console.error("Failed to load files:", e);
-        updateStatus("Error: " + e.message);
+        updateStatus("Error loading files. Check console.");
         projectFilesDropdown.innerHTML = '<option value="">-- Error --</option>';
     }
+}
+
+function processFetchedItems(items, baseUrl) {
+    const landXmlFiles = items.filter(i => i.type === 'FILE' && (i.name.toLowerCase().endsWith('.xml') || i.name.toLowerCase().endsWith('.landxml')));
+
+    projectFilesDropdown.innerHTML = landXmlFiles.length > 0 ? '<option value="">-- Select LandXML --</option>' : '<option value="">-- No XMLs Found --</option>';
+    
+    landXmlFiles.forEach(file => {
+        const opt = document.createElement('option');
+        opt.value = file.id;
+        opt.textContent = file.name;
+        opt.dataset.baseUrl = baseUrl;
+        projectFilesDropdown.appendChild(opt);
+    });
+
+    updateStatus(`Found ${landXmlFiles.length} LandXML files.`);
 }
 
 async function handleFileSelection() {
