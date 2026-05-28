@@ -4,6 +4,7 @@
 
 let TC_API = null;
 let alignments = [];
+let markupIds = { lines: [], texts: [] };
 
 // Initialize Trimble Connect API
 async function initTC() {
@@ -32,7 +33,7 @@ async function initTC() {
         updateStatus("Connected to Trimble Connect.");
     } catch (e) {
         console.error("Failed to connect to TC:", e);
-        updateStatus("Error: Could not connect to Trimble Connect. (" + e.message + ")");
+        updateStatus("Error: " + e.message);
     }
 }
 
@@ -123,7 +124,24 @@ function parseLandXML(xmlText) {
 async function clearMarkups() {
     if (!TC_API) return;
     updateStatus("Clearing viewer...");
-    location.reload(); 
+    
+    try {
+        const removeLines = TC_API.markup.removeLineMarkups || TC_API.markup.removeLineMarkup;
+        const removeTexts = TC_API.markup.removeTextMarkups || TC_API.markup.removeTextMarkup;
+
+        if (removeLines && markupIds.lines.length > 0) {
+            await removeLines.call(TC_API.markup, markupIds.lines);
+        }
+        if (removeTexts && markupIds.texts.length > 0) {
+            await removeTexts.call(TC_API.markup, markupIds.texts);
+        }
+        
+        markupIds = { lines: [], texts: [] };
+        updateStatus("Viewer cleared.");
+    } catch (e) {
+        console.warn("API clear failed, refreshing...", e);
+        location.reload(); 
+    }
 }
 
 async function drawSelectedAlignments() {
@@ -138,12 +156,15 @@ async function drawSelectedAlignments() {
         return;
     }
 
+    // Prevent duplicates by clearing first
+    await clearMarkups();
+
     const settings = {
         drawAlign: drawAlignmentsCheck.checked,
         drawSta: drawStationingCheck.checked,
         drawText: drawTextCheck.checked,
         interval: parseFloat(stationIntervalInput.value) || 100,
-        swap: true // Swapping Northing/Easting is now on by default
+        swap: true 
     };
 
     updateStatus("Generating geometry...");
@@ -163,36 +184,39 @@ async function drawSelectedAlignments() {
     try {
         const batchSize = 50;
         
-        // Helper to handle plural/singular API names
-        const addBatch = async (items, singularFnName, pluralFnName) => {
+        const addBatch = async (items, singularFnName, pluralFnName, type) => {
             if (items.length === 0) return;
-            
             const pluralFn = TC_API.markup[pluralFnName];
             const singularFn = TC_API.markup[singularFnName];
 
             for (let i = 0; i < items.length; i += batchSize) {
                 const batch = items.slice(i, i + batchSize);
                 try {
+                    let result;
                     if (pluralFn) {
-                        await pluralFn.call(TC_API.markup, batch);
+                        result = await pluralFn.call(TC_API.markup, batch);
                     } else if (singularFn) {
-                        // Some versions expect singularFn to take an array anyway
-                        await singularFn.call(TC_API.markup, batch);
+                        result = await singularFn.call(TC_API.markup, batch);
+                    }
+                    
+                    if (Array.isArray(result)) {
+                        markupIds[type].push(...result);
+                    } else if (result && result.id) {
+                        markupIds[type].push(result.id);
                     }
                 } catch (err) {
-                    console.warn(`Batch error in ${pluralFnName}/${singularFnName}:`, err);
-                    // Last resort: add one by one
                     if (singularFn) {
                         for (const item of batch) {
-                            await singularFn.call(TC_API.markup, [item]);
+                            const res = await singularFn.call(TC_API.markup, [item]);
+                            if (res && res.id) markupIds[type].push(res.id);
                         }
                     }
                 }
             }
         };
 
-        await addBatch(lineMarkups, 'addLineMarkup', 'addLineMarkups');
-        await addBatch(textMarkups, 'addTextMarkup', 'addTextMarkups');
+        await addBatch(lineMarkups, 'addLineMarkup', 'addLineMarkups', 'lines');
+        await addBatch(textMarkups, 'addTextMarkup', 'addTextMarkups', 'texts');
 
         updateStatus("Drawing complete.");
     } catch (e) {
@@ -201,13 +225,20 @@ async function drawSelectedAlignments() {
     }
 }
 
+function formatStation(s) {
+    const km = Math.floor(s / 1000);
+    const m = (s % 1000).toFixed(3);
+    const mParts = m.split('.');
+    const paddedM = mParts[0].padStart(3, '0');
+    return `${km}+${paddedM}${mParts[1] !== '000' ? '.' + mParts[1] : ''}`;
+}
+
 function processAlignment(align, settings) {
     const lines = [];
     const texts = [];
     const points = [];
     const toMM = 1000;
 
-    // 1. Parse Horizontal
     const coordGeom = align.node.getElementsByTagName('CoordGeom')[0];
     if (!coordGeom) return { lines, texts };
 
@@ -218,10 +249,8 @@ function processAlignment(align, settings) {
             const end = parseCoord(child.getElementsByTagName('End')[0].textContent, settings.swap);
             const staStart = parseFloat(child.getAttribute('staStart'));
             const length = parseFloat(child.getAttribute('length'));
-            
             points.push({ x: start.x, y: start.y, sta: staStart });
             points.push({ x: end.x, y: end.y, sta: staStart + length });
-
         } else if (child.tagName === 'Curve') {
             const start = parseCoord(child.getElementsByTagName('Start')[0].textContent, settings.swap);
             const center = parseCoord(child.getElementsByTagName('Center')[0].textContent, settings.swap);
@@ -250,7 +279,6 @@ function processAlignment(align, settings) {
         }
     }
 
-    // 2. Vertical
     const pvis = [];
     if (align.profile) {
         const pviNodes = align.profile.getElementsByTagName('PVI');
@@ -273,13 +301,11 @@ function processAlignment(align, settings) {
         return 0;
     };
 
-    // 3. Create Markups
     if (settings.drawAlign) {
         for (let i = 0; i < points.length - 1; i++) {
             const p1 = points[i];
             const p2 = points[i+1];
             if (Math.abs(p1.x - p2.x) < 0.001 && Math.abs(p1.y - p2.y) < 0.001) continue;
-
             lines.push({
                 color: { r: 255, g: 255, b: 0, a: 1 },
                 start: { positionX: p1.x * toMM, positionY: p1.y * toMM, positionZ: getElevation(p1.sta) * toMM },
@@ -291,8 +317,13 @@ function processAlignment(align, settings) {
     if (settings.drawSta || settings.drawText) {
         const startSta = points[0]?.sta || 0;
         const endSta = points[points.length - 1]?.sta || 0;
-        
-        for (let s = Math.ceil(startSta / settings.interval) * settings.interval; s <= endSta; s += settings.interval) {
+        const stations = [startSta];
+        for (let s = Math.ceil(startSta / settings.interval) * settings.interval; s < endSta; s += settings.interval) {
+            if (s > startSta + 0.01) stations.push(s);
+        }
+        if (endSta > startSta + 0.01) stations.push(endSta);
+
+        for (const s of stations) {
             const p = interpolateHorizontal(points, s);
             if (!p) continue;
             const elev = getElevation(s);
@@ -300,16 +331,16 @@ function processAlignment(align, settings) {
 
             if (settings.drawText) {
                 texts.push({
-                    text: `KM ${ (s/1000).toFixed(3) }`,
+                    text: s === startSta ? `START KM ${ formatStation(s) }` : (s === endSta ? `END KM ${ formatStation(s) }` : `KM ${ formatStation(s) }`),
                     color: { r: 0, g: 255, b: 255, a: 1 },
-                    fontSize: 12, // Attempt to set a smaller font size
+                    fontSize: 10, 
                     start: pos,
-                    end: { ...pos, positionZ: (elev + 1.5) * toMM } 
+                    end: { ...pos, positionZ: (elev + 1.2) * toMM } 
                 });
             }
 
             if (settings.drawSta) {
-                const pNext = interpolateHorizontal(points, s + 0.1);
+                const pNext = interpolateHorizontal(points, s + 0.1) || interpolateHorizontal(points, s - 0.1);
                 if (pNext) {
                     const dx = pNext.x - p.x;
                     const dy = pNext.y - p.y;
@@ -317,7 +348,6 @@ function processAlignment(align, settings) {
                     const nx = -dy / len;
                     const ny = dx / len;
                     const tickLen = 1.5;
-
                     lines.push({
                         color: { r: 0, g: 255, b: 255, a: 1 },
                         start: { positionX: (p.x - nx * tickLen) * toMM, positionY: (p.y - ny * tickLen) * toMM, positionZ: elev * toMM },
@@ -327,7 +357,6 @@ function processAlignment(align, settings) {
             }
         }
     }
-
     return { lines, texts };
 }
 
@@ -340,8 +369,8 @@ function parseCoord(str, swap) {
 
 function interpolateHorizontal(points, sta) {
     if (points.length === 0) return null;
-    if (sta <= points[0].sta) return points[0];
-    if (sta >= points[points.length - 1].sta) return points[points.length - 1];
+    if (sta <= points[0].sta + 0.001) return points[0];
+    if (sta >= points[points.length - 1].sta - 0.001) return points[points.length - 1];
     for (let i = 0; i < points.length - 1; i++) {
         if (sta >= points[i].sta && sta <= points[i+1].sta) {
             const t = (sta - points[i].sta) / (points[i+1].sta - points[i].sta);
