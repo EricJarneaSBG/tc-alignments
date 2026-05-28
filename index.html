@@ -9,41 +9,59 @@
 <body>
     <div id="container">
         <header>
-            <h1>LandXML Alignment</h1>
+            <nav class="tabs">
+                <button class="tab-btn active" data-tab="alignment">Alignments</button>
+                <button class="tab-btn" data-tab="report">Project Report</button>
+            </nav>
         </header>
         <main>
-            <div class="controls">
-                <div id="file-picker-container">
-                    <select id="project-files">
-                        <option value="">-- Select LandXML from Project --</option>
-                    </select>
-                    <button id="reload-files-btn" class="button small">🔄</button>
+            <!-- Alignment Tab Content -->
+            <div id="alignment-tab" class="tab-content">
+                <div class="controls">
+                    <div id="file-picker-container">
+                        <select id="project-files">
+                            <option value="">-- Select LandXML from Project --</option>
+                        </select>
+                        <button id="reload-files-btn" class="button small">🔄</button>
+                    </div>
+                    <button id="clear-btn" class="button secondary">Clear Viewer</button>
                 </div>
-                <button id="clear-btn" class="button secondary">Clear Viewer</button>
-            </div>
-            <div id="status-container">
-                <p id="status">Waiting for LandXML file...</p>
-                <div id="alignment-list" class="hidden">
-                    <h3>Select Alignments:</h3>
-                    <div id="list-items"></div>
-                    <button id="draw-btn" class="button">Draw Selected</button>
+                <div id="status-container">
+                    <p id="status">Waiting for LandXML file...</p>
+                    <div id="alignment-list" class="hidden">
+                        <h3>Select Alignments:</h3>
+                        <div id="list-items"></div>
+                        <button id="draw-btn" class="button">Draw Selected</button>
+                    </div>
+                </div>
+                <div class="settings">
+                    <label>
+                        <input type="checkbox" id="draw-alignments" checked> Show Alignment Lines
+                    </label>
+                    <label>
+                        <input type="checkbox" id="draw-stationing" checked> Show Stationing Ticks
+                    </label>
+                    <label>
+                        <input type="checkbox" id="draw-text" checked> Show KM Labels
+                    </label>
+                    <hr>
+                    <label>
+                        Stationing Interval:
+                        <input type="number" id="station-interval" value="100" min="10" step="10"> m
+                    </label>
                 </div>
             </div>
-            <div class="settings">
-                <label>
-                    <input type="checkbox" id="draw-alignments" checked> Show Alignment Lines
-                </label>
-                <label>
-                    <input type="checkbox" id="draw-stationing" checked> Show Stationing Ticks
-                </label>
-                <label>
-                    <input type="checkbox" id="draw-text" checked> Show KM Labels
-                </label>
-                <hr>
-                <label>
-                    Stationing Interval:
-                    <input type="number" id="station-interval" value="100" min="10" step="10"> m
-                </label>
+
+            <!-- Report Tab Content -->
+            <div id="report-tab" class="tab-content hidden">
+                <iframe id="pbi-report" 
+                    src="https://app.powerbi.com/view?r=eyJrIjoiYTAyMmUxYmYtNTAwZS00YjQ2LTk3ZjgtM2M0OGQ3ODg3ODgxIiwidCI6IjBkZDY2ZGQ2LTA3MzAtNDdhZS1iMmYzLWJhMWY2MmZjNjE5MiIsImMiOjh9"
+                    frameborder="0" 
+                    allowFullScreen="true">
+                </iframe>
+                <div class="report-links">
+                    <a href="https://app.powerbi.com/Redirect?action=OpenReport&appId=a022e1bf-500e-4b46-97f8-3c48d7887861&reportObjectId=12bf1821-e1d7-413c-97a6-76bd0c478b55&ctid=0dd66dd6-0730-47ae-b2f3-ba1f625c6192&reportPage=b9caef292bd87f37cc28&pbi_source=appShareLink&portalSessionId=e17ebea4-cacb-413e-88a2-b8c85133fcd9" target="_blank" class="button secondary">Open in New Tab</a>
+                </div>
             </div>
         </main>
         <footer>

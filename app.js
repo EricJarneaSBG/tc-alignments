@@ -21,6 +21,25 @@ const drawStationingCheck = document.getElementById('draw-stationing');
 const drawTextCheck = document.getElementById('draw-text');
 const stationIntervalInput = document.getElementById('station-interval');
 
+// Tab Switching Logic
+const tabBtns = document.querySelectorAll('.tab-btn');
+const tabContents = document.querySelectorAll('.tab-content');
+
+tabBtns.forEach(btn => {
+    btn.addEventListener('click', () => {
+        const targetTab = btn.dataset.tab;
+        tabBtns.forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        tabContents.forEach(content => {
+            if (content.id === `${targetTab}-tab`) {
+                content.classList.remove('hidden');
+            } else {
+                content.classList.add('hidden');
+            }
+        });
+    });
+});
+
 // Initialize Trimble Connect API
 async function initTC() {
     try {
@@ -78,31 +97,42 @@ async function loadProjectFiles() {
     projectFilesDropdown.innerHTML = '<option value="">-- Loading... --</option>';
 
     try {
-        const project = await TC_API.project.getCurrentProject();
+        const projectInfo = await TC_API.project.getProject();
         const token = await TC_API.extension.requestPermission("accesstoken");
         
-        console.log("Current Project Data:", project);
+        console.log("Workspace Project Data:", projectInfo);
 
-        // Determine API Base URL using project.location
-        let baseUrl = "https://app.connect.trimble.com/tc/api/2.0";
-        if (project.location === "europe" || project.location === "europe-west") {
-            baseUrl = "https://app21.connect.trimble.com/tc/api/2.0";
-        } else if (project.location === "asia" || project.location === "asia-pacific") {
-            baseUrl = "https://app31.connect.trimble.com/tc/api/2.0";
-        }
+        const referrer = document.referrer || "";
+        let hostApiUrl = "https://app.connect.trimble.com/tc/api/2.0";
+        if (referrer.includes("app21")) hostApiUrl = "https://app21.connect.trimble.com/tc/api/2.0";
+        if (referrer.includes("app31")) hostApiUrl = "https://app31.connect.trimble.com/tc/api/2.0";
 
-        console.log(`Region: ${project.location}. Using API: ${baseUrl}`);
-        const folderId = project.id; // Root folder ID is the Project ID in 2.0 API
+        console.log("Using Host API:", hostApiUrl);
 
-        // Root folder ID is the same as project ID in many cases, but rootFolderId is more explicit
-        const response = await fetch(`${baseUrl}/folders/${folderId}/items`, {
+        const projectResp = await fetch(`${hostApiUrl}/projects/${projectInfo.id}`, {
             headers: { 
-                'Authorization': `Bearer ${token}`,
-                'Range': 'items=0-100' // Mandatory for many regional servers
+                'Authorization': `Bearer ${token}`
             }
         });
 
-        if (!response.ok) throw new Error(`API Error: ${response.status}`);
+        if (!projectResp.ok) {
+            throw new Error(`Project Discovery Failed: ${projectResp.status}`);
+        }
+
+        const projectData = await projectResp.json();
+        console.log("REST Project Discovery Data:", projectData);
+
+        const folderId = projectData.rootFolderId || projectData.id;
+        console.log(`Using Folder ID: ${folderId}`);
+
+        const response = await fetch(`${hostApiUrl}/folders/${folderId}/items`, {
+            headers: { 
+                'Authorization': `Bearer ${token}`,
+                'Range': 'items=0-100'
+            }
+        });
+
+        if (!response.ok) throw new Error(`Folder API Error: ${response.status}`);
 
         const items = await response.json();
         const landXmlFiles = items.filter(i => i.type === 'FILE' && (i.name.toLowerCase().endsWith('.xml') || i.name.toLowerCase().endsWith('.landxml')));
@@ -112,14 +142,14 @@ async function loadProjectFiles() {
             const opt = document.createElement('option');
             opt.value = file.id;
             opt.textContent = file.name;
-            opt.dataset.baseUrl = baseUrl;
+            opt.dataset.baseUrl = hostApiUrl; 
             projectFilesDropdown.appendChild(opt);
         });
 
         updateStatus(`Found ${landXmlFiles.length} LandXML files.`);
     } catch (e) {
         console.error("Failed to load files:", e);
-        updateStatus("Error loading files. Check console.");
+        updateStatus("Error: " + e.message);
         projectFilesDropdown.innerHTML = '<option value="">-- Error --</option>';
     }
 }
@@ -135,16 +165,12 @@ async function handleFileSelection() {
     
     try {
         const token = await TC_API.extension.requestPermission("accesstoken");
-        
-        // 1. Get download URL
         const dlResponse = await fetch(`${baseUrl}/files/${fileId}/downloadUrl`, {
             headers: { 'Authorization': `Bearer ${token}` }
         });
         if (!dlResponse.ok) throw new Error("Failed to get download URL");
         
         const dlData = await dlResponse.json();
-        
-        // 2. Fetch the actual content
         const contentResponse = await fetch(dlData.url);
         if (!contentResponse.ok) throw new Error("Failed to download file content");
         
@@ -260,7 +286,6 @@ async function drawSelectedAlignments() {
 
     try {
         const batchSize = 50;
-        
         const addItems = async (items, singularFn, pluralFn) => {
             for (let i = 0; i < items.length; i += batchSize) {
                 const batch = items.slice(i, i + batchSize);
