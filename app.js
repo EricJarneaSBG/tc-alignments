@@ -7,6 +7,20 @@ let alignments = [];
 let activeMarkupIds = []; 
 let idCounter = 1; 
 
+// UI Elements
+const statusText = document.getElementById('status');
+const alignmentList = document.getElementById('alignment-list');
+const listItems = document.getElementById('list-items');
+const drawBtn = document.getElementById('draw-btn');
+const clearBtn = document.getElementById('clear-btn');
+const projectFilesDropdown = document.getElementById('project-files');
+const reloadFilesBtn = document.getElementById('reload-files-btn');
+
+const drawAlignmentsCheck = document.getElementById('draw-alignments');
+const drawStationingCheck = document.getElementById('draw-stationing');
+const drawTextCheck = document.getElementById('draw-text');
+const stationIntervalInput = document.getElementById('station-interval');
+
 // Initialize Trimble Connect API
 async function initTC() {
     try {
@@ -32,31 +46,19 @@ async function initTC() {
         }, 30000);
         
         updateStatus("Connected to Trimble Connect.");
+        await loadProjectFiles();
     } catch (e) {
         console.error("Failed to connect to TC:", e);
         updateStatus("Error: " + e.message);
     }
 }
 
-// UI Elements
-const fileInput = document.getElementById('file-input');
-const statusText = document.getElementById('status');
-const alignmentList = document.getElementById('alignment-list');
-const listItems = document.getElementById('list-items');
-const drawBtn = document.getElementById('draw-btn');
-const clearBtn = document.getElementById('clear-btn');
-
-const drawAlignmentsCheck = document.getElementById('draw-alignments');
-const drawStationingCheck = document.getElementById('draw-stationing');
-const drawTextCheck = document.getElementById('draw-text');
-const stationIntervalInput = document.getElementById('station-interval');
-
 // Event Listeners
-fileInput.addEventListener('change', handleFileSelect);
+reloadFilesBtn.addEventListener('click', loadProjectFiles);
+projectFilesDropdown.addEventListener('change', handleFileSelection);
 drawBtn.addEventListener('click', async () => {
     updateStatus("Preparing viewer...");
     await clearMarkups();
-    // Tiny delay to ensure removal is processed
     await new Promise(r => setTimeout(r, 200)); 
     await drawSelectedAlignments();
 });
@@ -66,50 +68,83 @@ function updateStatus(text) {
     statusText.innerText = text;
 }
 
-async function clearMarkups() {
-    if (!TC_API || !TC_API.markup) return;
+/**
+ * Fetch files from the current project
+ */
+async function loadProjectFiles() {
+    if (!TC_API) return;
     
-    if (activeMarkupIds.length === 0) {
-        console.log("Nothing to clear.");
-        return;
-    }
+    updateStatus("Loading project files...");
+    projectFilesDropdown.innerHTML = '<option value="">-- Loading... --</option>';
 
-    updateStatus("Clearing previous markups...");
-    
     try {
-        const batchSize = 100;
-        const removeFn = TC_API.markup.removeMarkups || TC_API.markup.removeLineMarkups;
+        const project = await TC_API.project.getCurrentProject();
+        const token = await TC_API.extension.requestPermission("accesstoken");
         
-        if (removeFn) {
-            for (let i = 0; i < activeMarkupIds.length; i += batchSize) {
-                const batch = activeMarkupIds.slice(i, i + batchSize);
-                await removeFn.call(TC_API.markup, batch);
-            }
-        } else if (TC_API.markup.removeLineMarkup) {
-            for (const id of activeMarkupIds) {
-                await TC_API.markup.removeLineMarkup(id);
-            }
-        }
-        
-        activeMarkupIds = [];
-        updateStatus("Viewer cleared.");
+        // Determine API Base URL (Region)
+        // Usually, we can infer it from the parent window or project data
+        // For now, we'll try the North America endpoint and fallback if needed
+        let baseUrl = "https://app.connect.trimble.com/tc/api/2.0";
+        if (window.parent.location.hostname.includes("app21")) baseUrl = "https://app21.connect.trimble.com/tc/api/2.0";
+        if (window.parent.location.hostname.includes("app31")) baseUrl = "https://app31.connect.trimble.com/tc/api/2.0";
+
+        // Root folder ID is the same as project ID
+        const response = await fetch(`${baseUrl}/folders/${project.id}/items`, {
+            headers: { 'Authorization': `Bearer ${token}` }
+        });
+
+        if (!response.ok) throw new Error(`API Error: ${response.status}`);
+
+        const items = await response.json();
+        const landXmlFiles = items.filter(i => i.type === 'FILE' && (i.name.toLowerCase().endsWith('.xml') || i.name.toLowerCase().endsWith('.landxml')));
+
+        projectFilesDropdown.innerHTML = '<option value="">-- Select LandXML --</option>';
+        landXmlFiles.forEach(file => {
+            const opt = document.createElement('option');
+            opt.value = file.id;
+            opt.textContent = file.name;
+            opt.dataset.baseUrl = baseUrl;
+            projectFilesDropdown.appendChild(opt);
+        });
+
+        updateStatus(`Found ${landXmlFiles.length} LandXML files.`);
     } catch (e) {
-        console.error("Clear failed:", e);
-        activeMarkupIds = []; 
+        console.error("Failed to load files:", e);
+        updateStatus("Error loading files. Check console.");
+        projectFilesDropdown.innerHTML = '<option value="">-- Error --</option>';
     }
 }
 
-async function handleFileSelect(event) {
-    const file = event.target.files[0];
-    if (!file) return;
+async function handleFileSelection() {
+    const fileId = projectFilesDropdown.value;
+    if (!fileId) return;
 
-    updateStatus(`Reading ${file.name}...`);
-    const reader = new FileReader();
-    reader.onload = (e) => {
-        const xmlText = e.target.result;
+    const selectedOption = projectFilesDropdown.selectedOptions[0];
+    const baseUrl = selectedOption.dataset.baseUrl;
+
+    updateStatus(`Fetching file content...`);
+    
+    try {
+        const token = await TC_API.extension.requestPermission("accesstoken");
+        
+        // 1. Get download URL
+        const dlResponse = await fetch(`${baseUrl}/files/${fileId}/downloadUrl`, {
+            headers: { 'Authorization': `Bearer ${token}` }
+        });
+        if (!dlResponse.ok) throw new Error("Failed to get download URL");
+        
+        const dlData = await dlResponse.json();
+        
+        // 2. Fetch the actual content
+        const contentResponse = await fetch(dlData.url);
+        if (!contentResponse.ok) throw new Error("Failed to download file content");
+        
+        const xmlText = await contentResponse.text();
         parseLandXML(xmlText);
-    };
-    reader.readAsText(file);
+    } catch (e) {
+        console.error("Fetch error:", e);
+        updateStatus("Error fetching file.");
+    }
 }
 
 function parseLandXML(xmlText) {
@@ -158,7 +193,29 @@ function parseLandXML(xmlText) {
     }
 
     alignmentList.classList.remove('hidden');
-    updateStatus(`Found ${alignments.length} alignments.`);
+    updateStatus(`Found ${alignments.length} alignments in selected file.`);
+}
+
+async function clearMarkups() {
+    if (!TC_API || !TC_API.markup) return;
+    if (activeMarkupIds.length === 0) return;
+
+    updateStatus("Clearing previous markups...");
+    try {
+        const batchSize = 100;
+        const removeFn = TC_API.markup.removeMarkups || TC_API.markup.removeLineMarkups;
+        if (removeFn) {
+            for (let i = 0; i < activeMarkupIds.length; i += batchSize) {
+                const batch = activeMarkupIds.slice(i, i + batchSize);
+                await removeFn.call(TC_API.markup, batch);
+            }
+        }
+        activeMarkupIds = [];
+        updateStatus("Viewer cleared.");
+    } catch (e) {
+        console.error("Clear failed:", e);
+        activeMarkupIds = []; 
+    }
 }
 
 async function drawSelectedAlignments() {
@@ -202,10 +259,7 @@ async function drawSelectedAlignments() {
                 else if (singularFn) {
                     for (const item of batch) await singularFn.call(TC_API.markup, item);
                 }
-                
-                batch.forEach(item => {
-                    if (item.id) activeMarkupIds.push(item.id);
-                });
+                batch.forEach(item => { if (item.id) activeMarkupIds.push(item.id); });
             }
         };
 

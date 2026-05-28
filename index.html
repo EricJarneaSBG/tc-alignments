@@ -13,8 +13,12 @@
         </header>
         <main>
             <div class="controls">
-                <input type="file" id="file-input" accept=".xml,.landxml">
-                <label for="file-input" class="button">Load LandXML</label>
+                <div id="file-picker-container">
+                    <select id="project-files">
+                        <option value="">-- Select LandXML from Project --</option>
+                    </select>
+                    <button id="reload-files-btn" class="button small">🔄</button>
+                </div>
                 <button id="clear-btn" class="button secondary">Clear Viewer</button>
             </div>
             <div id="status-container">

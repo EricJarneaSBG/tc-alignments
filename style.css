@@ -24,6 +24,24 @@ header h1 {
     margin-top: 0;
 }
 
+#file-picker-container {
+    display: flex;
+    gap: 5px;
+    width: 100%;
+}
+
+#project-files {
+    flex-grow: 1;
+    padding: 8px;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    font-size: 0.9rem;
+}
+
+.button.small {
+    padding: 5px 10px;
+}
+
 .controls {
     display: flex;
     flex-direction: column;
