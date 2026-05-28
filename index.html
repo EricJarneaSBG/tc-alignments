@@ -14,26 +14,17 @@
         <main>
             <div class="controls">
                 <div id="file-picker-container">
-                    <div class="search-wrapper">
-                        <input type="text" id="file-search" placeholder="Search files...">
-                        <select id="project-files">
-                            <option value="">-- Select LandXML --</option>
-                        </select>
-                    </div>
+                    <select id="project-files">
+                        <option value="">-- Select LandXML from Project --</option>
+                    </select>
                     <button id="reload-files-btn" class="button small">🔄</button>
                 </div>
                 <button id="clear-btn" class="button secondary">Clear Viewer</button>
             </div>
             <div id="status-container">
-                <p id="status">Waiting for LandXML selection...</p>
+                <p id="status">Waiting for LandXML file...</p>
                 <div id="alignment-list" class="hidden">
-                    <div class="list-header">
-                        <h3>Alignments:</h3>
-                        <div class="list-actions">
-                            <button id="select-all" class="link-btn">All</button> | 
-                            <button id="select-none" class="link-btn">None</button>
-                        </div>
-                    </div>
+                    <h3>Select Alignments:</h3>
                     <div id="list-items"></div>
                     <button id="draw-btn" class="button">Draw Selected</button>
                 </div>
@@ -47,9 +38,6 @@
                 </label>
                 <label>
                     <input type="checkbox" id="draw-text" checked> Show KM Labels
-                </label>
-                <label>
-                    <input type="checkbox" id="zoom-to-selection" checked> Zoom to Selection
                 </label>
                 <hr>
                 <label>

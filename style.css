@@ -28,24 +28,10 @@ header h1 {
     display: flex;
     gap: 5px;
     width: 100%;
-    align-items: flex-end;
-}
-
-.search-wrapper {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    flex-grow: 1;
-}
-
-#file-search {
-    padding: 6px;
-    font-size: 0.8rem;
-    border: 1px solid #ddd;
-    border-radius: 4px;
 }
 
 #project-files {
+    flex-grow: 1;
     padding: 8px;
     border: 1px solid #ccc;
     border-radius: 4px;
@@ -110,35 +96,8 @@ input[type="file"] {
     margin-top: 15px;
 }
 
-.list-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 8px;
-}
-
-.list-header h3 {
-    margin: 0;
-    font-size: 0.95rem;
-}
-
-.link-btn {
-    background: none;
-    border: none;
-    color: #0078d4;
-    padding: 0;
-    cursor: pointer;
-    font-size: 0.8rem;
-    text-decoration: underline;
-}
-
-#list-items {
-    max-height: 200px;
-    overflow-y: auto;
-    border: 1px solid #eee;
-    padding: 5px;
-    margin-bottom: 15px;
-    background: white;
+.hidden {
+    display: none;
 }
 
 .alignment-item {
@@ -146,15 +105,7 @@ input[type="file"] {
     align-items: center;
     gap: 10px;
     padding: 5px 0;
-    font-size: 0.85rem;
-    border-bottom: 1px solid #f9f9f9;
-}
-
-.meta {
-    color: #888;
-    font-size: 0.75rem;
-    margin-left: auto;
-    padding-right: 5px;
+    font-size: 0.9rem;
 }
 
 .settings {
