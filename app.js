@@ -52,11 +52,58 @@ const stationIntervalInput = document.getElementById('station-interval');
 
 // Event Listeners
 fileInput.addEventListener('change', handleFileSelect);
-drawBtn.addEventListener('click', drawSelectedAlignments);
+drawBtn.addEventListener('click', async () => {
+    // Force a clear before redrawing
+    await clearMarkups();
+    await drawSelectedAlignments();
+});
 clearBtn.addEventListener('click', clearMarkups);
 
 function updateStatus(text) {
     statusText.innerText = text;
+}
+
+async function clearMarkups() {
+    if (!TC_API || !TC_API.markup) {
+        console.warn("API not ready for clearing.");
+        return;
+    }
+
+    if (markupIds.lines.length === 0 && markupIds.texts.length === 0) {
+        console.log("Nothing to clear.");
+        return;
+    }
+
+    updateStatus("Clearing viewer...");
+    
+    try {
+        const batchSize = 100;
+        
+        // Helper to remove in batches
+        const removeBatch = async (ids, removeFnName) => {
+            const removeFn = TC_API.markup[removeFnName];
+            if (!removeFn || ids.length === 0) return;
+            
+            for (let i = 0; i < ids.length; i += batchSize) {
+                const batch = ids.slice(i, i + batchSize);
+                try {
+                    await removeFn.call(TC_API.markup, batch);
+                } catch (e) {
+                    console.warn(`Error removing batch from ${removeFnName}:`, e);
+                }
+            }
+        };
+
+        await removeBatch(markupIds.lines, 'removeLineMarkups');
+        await removeBatch(markupIds.texts, 'removeTextMarkups');
+
+        markupIds = { lines: [], texts: [] };
+        updateStatus("Viewer cleared.");
+    } catch (e) {
+        console.error("Critical error clearing markups:", e);
+        updateStatus("Clear failed. Refreshing page as fallback...");
+        setTimeout(() => location.reload(), 1000);
+    }
 }
 
 async function handleFileSelect(event) {
@@ -121,29 +168,6 @@ function parseLandXML(xmlText) {
     updateStatus(`Found ${alignments.length} alignments.`);
 }
 
-async function clearMarkups() {
-    if (!TC_API) return;
-    updateStatus("Clearing viewer...");
-    
-    try {
-        const removeLines = TC_API.markup.removeLineMarkups || TC_API.markup.removeLineMarkup;
-        const removeTexts = TC_API.markup.removeTextMarkups || TC_API.markup.removeTextMarkup;
-
-        if (removeLines && markupIds.lines.length > 0) {
-            await removeLines.call(TC_API.markup, markupIds.lines);
-        }
-        if (removeTexts && markupIds.texts.length > 0) {
-            await removeTexts.call(TC_API.markup, markupIds.texts);
-        }
-        
-        markupIds = { lines: [], texts: [] };
-        updateStatus("Viewer cleared.");
-    } catch (e) {
-        console.warn("API clear failed, refreshing...", e);
-        location.reload(); 
-    }
-}
-
 async function drawSelectedAlignments() {
     if (!TC_API) {
         alert("Not connected to Trimble Connect.");
@@ -155,9 +179,6 @@ async function drawSelectedAlignments() {
         alert("Please select at least one alignment.");
         return;
     }
-
-    // Prevent duplicates by clearing first
-    await clearMarkups();
 
     const settings = {
         drawAlign: drawAlignmentsCheck.checked,
@@ -182,7 +203,7 @@ async function drawSelectedAlignments() {
     updateStatus(`Drawing ${lineMarkups.length} lines and ${textMarkups.length} labels...`);
 
     try {
-        const batchSize = 50;
+        const batchSize = 50; 
         
         const addBatch = async (items, singularFnName, pluralFnName, type) => {
             if (items.length === 0) return;
@@ -199,18 +220,18 @@ async function drawSelectedAlignments() {
                         result = await singularFn.call(TC_API.markup, batch);
                     }
                     
+                    // Track IDs from result
                     if (Array.isArray(result)) {
-                        markupIds[type].push(...result);
-                    } else if (result && result.id) {
-                        markupIds[type].push(result.id);
+                        result.forEach(m => {
+                            if (typeof m === 'object' && m.id) markupIds[type].push(m.id);
+                            else if (typeof m === 'number' || typeof m === 'string') markupIds[type].push(m);
+                        });
+                    } else if (result) {
+                        if (result.id) markupIds[type].push(result.id);
+                        else if (typeof result === 'number' || typeof result === 'string') markupIds[type].push(result);
                     }
                 } catch (err) {
-                    if (singularFn) {
-                        for (const item of batch) {
-                            const res = await singularFn.call(TC_API.markup, [item]);
-                            if (res && res.id) markupIds[type].push(res.id);
-                        }
-                    }
+                    console.warn(`Add error in ${pluralFnName}:`, err);
                 }
             }
         };
@@ -245,36 +266,50 @@ function processAlignment(align, settings) {
     const children = coordGeom.children;
     for (const child of children) {
         if (child.tagName === 'Line') {
-            const start = parseCoord(child.getElementsByTagName('Start')[0].textContent, settings.swap);
-            const end = parseCoord(child.getElementsByTagName('End')[0].textContent, settings.swap);
+            const startNode = child.getElementsByTagName('Start')[0];
+            const endNode = child.getElementsByTagName('End')[0];
+            if (!startNode || !endNode) continue;
+            
+            const start = parseCoord(startNode.textContent, settings.swap);
+            const end = parseCoord(endNode.textContent, settings.swap);
             const staStart = parseFloat(child.getAttribute('staStart'));
             const length = parseFloat(child.getAttribute('length'));
-            points.push({ x: start.x, y: start.y, sta: staStart });
-            points.push({ x: end.x, y: end.y, sta: staStart + length });
+            
+            if (isValidPoint(start) && isValidPoint(end)) {
+                points.push({ x: start.x, y: start.y, sta: staStart });
+                points.push({ x: end.x, y: end.y, sta: staStart + length });
+            }
         } else if (child.tagName === 'Curve') {
-            const start = parseCoord(child.getElementsByTagName('Start')[0].textContent, settings.swap);
-            const center = parseCoord(child.getElementsByTagName('Center')[0].textContent, settings.swap);
-            const end = parseCoord(child.getElementsByTagName('End')[0].textContent, settings.swap);
+            const startNode = child.getElementsByTagName('Start')[0];
+            const centerNode = child.getElementsByTagName('Center')[0];
+            const endNode = child.getElementsByTagName('End')[0];
+            if (!startNode || !centerNode || !endNode) continue;
+
+            const start = parseCoord(startNode.textContent, settings.swap);
+            const center = parseCoord(centerNode.textContent, settings.swap);
+            const end = parseCoord(endNode.textContent, settings.swap);
             const staStart = parseFloat(child.getAttribute('staStart'));
             const length = parseFloat(child.getAttribute('length'));
             const radius = parseFloat(child.getAttribute('radius'));
             const rot = child.getAttribute('rot');
 
-            const segments = Math.max(2, Math.ceil(length / 5));
-            const startAngle = Math.atan2(start.y - center.y, start.x - center.x);
-            let endAngle = Math.atan2(end.y - center.y, end.x - center.x);
+            if (isValidPoint(start) && isValidPoint(center) && isValidPoint(end)) {
+                const segments = Math.max(2, Math.ceil(length / 10)); 
+                const startAngle = Math.atan2(start.y - center.y, start.x - center.x);
+                let endAngle = Math.atan2(end.y - center.y, end.x - center.x);
 
-            if (rot === 'cw' && endAngle > startAngle) endAngle -= 2 * Math.PI;
-            if (rot === 'ccw' && endAngle < startAngle) endAngle += 2 * Math.PI;
+                if (rot === 'cw' && endAngle > startAngle) endAngle -= 2 * Math.PI;
+                if (rot === 'ccw' && endAngle < startAngle) endAngle += 2 * Math.PI;
 
-            for (let i = 0; i <= segments; i++) {
-                const t = i / segments;
-                const angle = startAngle + t * (endAngle - startAngle);
-                points.push({
-                    x: center.x + radius * Math.cos(angle),
-                    y: center.y + radius * Math.sin(angle),
-                    sta: staStart + t * length
-                });
+                for (let i = 0; i <= segments; i++) {
+                    const t = i / segments;
+                    const angle = startAngle + t * (endAngle - startAngle);
+                    points.push({
+                        x: center.x + radius * Math.cos(angle),
+                        y: center.y + radius * Math.sin(angle),
+                        sta: staStart + t * length
+                    });
+                }
             }
         }
     }
@@ -284,7 +319,11 @@ function processAlignment(align, settings) {
         const pviNodes = align.profile.getElementsByTagName('PVI');
         for (let i = 0; i < pviNodes.length; i++) {
             const parts = pviNodes[i].textContent.trim().split(/\s+/);
-            pvis.push({ sta: parseFloat(parts[0]), elev: parseFloat(parts[1]) });
+            if (parts.length >= 2) {
+                const sVal = parseFloat(parts[0]);
+                const eVal = parseFloat(parts[1]);
+                if (!isNaN(sVal) && !isNaN(eVal)) pvis.push({ sta: sVal, elev: eVal });
+            }
         }
     }
 
@@ -345,14 +384,16 @@ function processAlignment(align, settings) {
                     const dx = pNext.x - p.x;
                     const dy = pNext.y - p.y;
                     const len = Math.sqrt(dx*dx + dy*dy);
-                    const nx = -dy / len;
-                    const ny = dx / len;
-                    const tickLen = 1.5;
-                    lines.push({
-                        color: { r: 0, g: 255, b: 255, a: 1 },
-                        start: { positionX: (p.x - nx * tickLen) * toMM, positionY: (p.y - ny * tickLen) * toMM, positionZ: elev * toMM },
-                        end: { positionX: (p.x + nx * tickLen) * toMM, positionY: (p.y + ny * tickLen) * toMM, positionZ: elev * toMM }
-                    });
+                    if (len > 0.0001) {
+                        const nx = -dy / len;
+                        const ny = dx / len;
+                        const tickLen = 0.8; 
+                        lines.push({
+                            color: { r: 0, g: 255, b: 255, a: 1 },
+                            start: { positionX: (p.x - nx * tickLen) * toMM, positionY: (p.y - ny * tickLen) * toMM, positionZ: elev * toMM },
+                            end: { positionX: (p.x + nx * tickLen) * toMM, positionY: (p.y + ny * tickLen) * toMM, positionZ: elev * toMM }
+                        });
+                    }
                 }
             }
         }
@@ -360,10 +401,16 @@ function processAlignment(align, settings) {
     return { lines, texts };
 }
 
+function isValidPoint(p) {
+    return p && !isNaN(p.x) && !isNaN(p.y) && isFinite(p.x) && isFinite(p.y);
+}
+
 function parseCoord(str, swap) {
+    if (!str) return { x: 0, y: 0 };
     const parts = str.trim().split(/\s+/);
     const v1 = parseFloat(parts[0]);
     const v2 = parseFloat(parts[1]);
+    if (isNaN(v1) || isNaN(v2)) return { x: 0, y: 0 };
     return swap ? { x: v2, y: v1 } : { x: v1, y: v2 };
 }
 
@@ -374,6 +421,7 @@ function interpolateHorizontal(points, sta) {
     for (let i = 0; i < points.length - 1; i++) {
         if (sta >= points[i].sta && sta <= points[i+1].sta) {
             const t = (sta - points[i].sta) / (points[i+1].sta - points[i].sta);
+            if (isNaN(t) || !isFinite(t)) return points[i];
             return {
                 x: points[i].x + t * (points[i+1].x - points[i].x),
                 y: points[i].y + t * (points[i+1].y - points[i].y)
