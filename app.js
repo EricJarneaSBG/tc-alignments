@@ -5,6 +5,7 @@
 let TC_API = null;
 let alignments = [];
 let activeMarkupIds = []; 
+let idCounter = 1; // Global counter to ensure unique IDs
 
 // Initialize Trimble Connect API
 async function initTC() {
@@ -55,8 +56,10 @@ const fontSizeVal = document.getElementById('font-size-val');
 // Event Listeners
 fileInput.addEventListener('change', handleFileSelect);
 drawBtn.addEventListener('click', async () => {
-    updateStatus("Preparing viewer...");
+    updateStatus("Clearing previous and drawing...");
     await clearMarkups();
+    // Small delay to ensure clear command is processed by viewer
+    await new Promise(r => setTimeout(r, 200)); 
     await drawSelectedAlignments();
 });
 clearBtn.addEventListener('click', clearMarkups);
@@ -70,23 +73,34 @@ function updateStatus(text) {
 
 async function clearMarkups() {
     if (!TC_API || !TC_API.markup) return;
-    updateStatus("Clearing previous markups...");
+    
+    if (activeMarkupIds.length === 0) {
+        console.log("Nothing to clear.");
+        return;
+    }
+
     try {
-        if (activeMarkupIds.length > 0) {
-            const batchSize = 100;
+        const batchSize = 100;
+        // Try multiple methods for maximum compatibility
+        const removeFn = TC_API.markup.removeMarkups || TC_API.markup.removeLineMarkups;
+        
+        if (removeFn) {
             for (let i = 0; i < activeMarkupIds.length; i += batchSize) {
                 const batch = activeMarkupIds.slice(i, i + batchSize);
-                if (TC_API.markup.removeMarkups) await TC_API.markup.removeMarkups(batch);
-                else if (TC_API.markup.removeLineMarkups) await TC_API.markup.removeLineMarkups(batch);
-                else if (TC_API.markup.removeLineMarkup) {
-                    for(const id of batch) await TC_API.markup.removeLineMarkup(id);
-                }
+                await removeFn.call(TC_API.markup, batch);
+            }
+        } else if (TC_API.markup.removeLineMarkup) {
+            for (const id of activeMarkupIds) {
+                await TC_API.markup.removeLineMarkup(id);
             }
         }
+        
+        console.log(`Cleared ${activeMarkupIds.length} markups.`);
         activeMarkupIds = [];
         updateStatus("Viewer cleared.");
     } catch (e) {
         console.error("Clear failed:", e);
+        activeMarkupIds = []; // Reset anyway to prevent infinite loops
     }
 }
 
@@ -153,6 +167,8 @@ function parseLandXML(xmlText) {
 }
 
 async function drawSelectedAlignments() {
+    if (!TC_API) return;
+    
     const selectedIds = Array.from(listItems.querySelectorAll('input:checked')).map(cb => parseInt(cb.value));
     if (selectedIds.length === 0) {
         alert("Please select at least one alignment.");
@@ -183,24 +199,21 @@ async function drawSelectedAlignments() {
     updateStatus(`Drawing ${lines.length + texts.length} elements...`);
 
     try {
-        const batchSize = 40;
+        const batchSize = 50;
         
         const addItems = async (items, singularFn, pluralFn) => {
             for (let i = 0; i < items.length; i += batchSize) {
                 const batch = items.slice(i, i + batchSize);
-                let result;
-                if (pluralFn) result = await pluralFn.call(TC_API.markup, batch);
-                else if (singularFn) result = await singularFn.call(TC_API.markup, batch);
-
-                if (Array.isArray(result)) {
-                    result.forEach(r => {
-                        if (r && r.id) activeMarkupIds.push(r.id);
-                        else if (typeof r === 'string' || typeof r === 'number') activeMarkupIds.push(r);
-                    });
-                } else if (result) {
-                    if (result.id) activeMarkupIds.push(result.id);
-                    else if (typeof result === 'string' || typeof result === 'number') activeMarkupIds.push(result);
+                // We pass explicit IDs, so we know exactly what to clear later
+                if (pluralFn) await pluralFn.call(TC_API.markup, batch);
+                else if (singularFn) {
+                    for (const item of batch) await singularFn.call(TC_API.markup, item);
                 }
+                
+                // Track the IDs we just sent
+                batch.forEach(item => {
+                    if (item.id) activeMarkupIds.push(item.id);
+                });
             }
         };
 
@@ -214,9 +227,6 @@ async function drawSelectedAlignments() {
     }
 }
 
-/**
- * Formats station to engineering format: KM X+YYY.ZZZ
- */
 function formatStation(s) {
     const km = Math.floor(s / 1000);
     const m = (s % 1000).toFixed(3);
@@ -230,10 +240,6 @@ function processAlignment(align, settings) {
     const texts = [];
     const points = [];
     const toMM = 1000;
-
-    // Use slider value to define "physical height" of the text (distance between start and end)
-    // We scale the 6-30 value to a 0.5m - 5m range
-    const textHeightM = (settings.fontSize / 10) * 1.5;
 
     const coordGeom = align.node.getElementsByTagName('CoordGeom')[0];
     if (!coordGeom) return { lines, texts };
@@ -300,6 +306,7 @@ function processAlignment(align, settings) {
             const p1 = points[i], p2 = points[i+1];
             if (dist(p1, p2) < 0.001) continue;
             lines.push({
+                id: idCounter++,
                 color: { r: 255, g: 255, b: 0, a: 1 },
                 start: { positionX: p1.x * toMM, positionY: p1.y * toMM, positionZ: getElev(p1.sta) * toMM },
                 end: { positionX: p2.x * toMM, positionY: p2.y * toMM, positionZ: getElev(p2.sta) * toMM }
@@ -324,12 +331,18 @@ function processAlignment(align, settings) {
 
             if (settings.drawText) {
                 const isExtreme = (s === startSta || s === endSta);
+                // Attempt all candidate names for font size to see which one the viewer respects
                 texts.push({
+                    id: idCounter++,
                     text: isExtreme ? (s === startSta ? `START KM ${formatStation(s)}` : `END KM ${formatStation(s)}`) : `KM ${formatStation(s)}`,
                     color: isExtreme ? { r: 255, g: 100, b: 0, a: 1 } : { r: 0, g: 255, b: 255, a: 1 },
                     start: pos,
-                    // The distance between start and end defines the physical height/scale in many 3D viewers
-                    end: { ...pos, positionZ: (el + textHeightM) * toMM }
+                    end: { ...pos, positionZ: (el + 1.5) * toMM },
+                    // Property candidates:
+                    fontSize: settings.fontSize,
+                    fontHeight: settings.fontSize,
+                    size: settings.fontSize,
+                    scale: settings.fontSize / 10
                 });
             }
 
@@ -340,8 +353,9 @@ function processAlignment(align, settings) {
                     const l = Math.sqrt(dx*dx + dy*dy);
                     if (l > 0.0001) {
                         const nx = -dy/l, ny = dx/l;
-                        const tL = (s === startSta || s === endSta) ? 1.5 : 0.8; // Longer ticks for start/end
+                        const tL = (s === startSta || s === endSta) ? 1.5 : 0.8; 
                         lines.push({
+                            id: idCounter++,
                             color: (s === startSta || s === endSta) ? { r: 255, g: 100, b: 0, a: 1 } : { r: 0, g: 255, b: 255, a: 1 },
                             start: { positionX: (p.x - nx*tL)*toMM, positionY: (p.y - ny*tL)*toMM, positionZ: el*toMM },
                             end: { positionX: (p.x + nx*tL)*toMM, positionY: (p.y + ny*tL)*toMM, positionZ: el*toMM }
