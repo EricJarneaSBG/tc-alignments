@@ -47,7 +47,6 @@ const clearBtn = document.getElementById('clear-btn');
 const drawAlignmentsCheck = document.getElementById('draw-alignments');
 const drawStationingCheck = document.getElementById('draw-stationing');
 const drawTextCheck = document.getElementById('draw-text');
-const swapCoordsCheckbox = document.getElementById('swap-coords');
 const stationIntervalInput = document.getElementById('station-interval');
 
 // Event Listeners
@@ -144,7 +143,7 @@ async function drawSelectedAlignments() {
         drawSta: drawStationingCheck.checked,
         drawText: drawTextCheck.checked,
         interval: parseFloat(stationIntervalInput.value) || 100,
-        swap: swapCoordsCheckbox.checked
+        swap: true // Swapping Northing/Easting is now on by default
     };
 
     updateStatus("Generating geometry...");
@@ -303,6 +302,7 @@ function processAlignment(align, settings) {
                 texts.push({
                     text: `KM ${ (s/1000).toFixed(3) }`,
                     color: { r: 0, g: 255, b: 255, a: 1 },
+                    fontSize: 12, // Attempt to set a smaller font size
                     start: pos,
                     end: { ...pos, positionZ: (elev + 1.5) * toMM } 
                 });
