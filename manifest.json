@@ -1,6 +1,9 @@
 {
-  "title": "TC Alignments",
-  "url": "https://ericjarneasbg.github.io/tc-alignments/index.html",
-  "description": "LandXML alignment viewer",
-  "enabled": true
+  "name": "LandXML Stationing",
+  "version": "1.0.0",
+  "icon": "",
+  "url": "https://ericjarneasbg.github.io/tc-alignments/",
+  "enabled": true,
+  "configCommand": "",
+  "description": "Reads LandXML alignment stationing and draws labels in the 3D viewer"
 }

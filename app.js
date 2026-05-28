@@ -1,199 +1,137 @@
-let viewer = null;
-let alignment = [];
-let stations = [];
+let API = null;
 
-// INIT Trimble
-TrimbleConnectWorkspace.connect(window.parent, (api) => {
-    viewer = api.viewer;
-    log("Connected to Trimble!");
-});
+async function init() {
+  API = await TrimbleConnectWorkspace.connect(window.parent, (event, data) => {
+    console.log(event, data);
+  });
 
-// LOG
-function log(msg) {
-    document.getElementById("log").innerText += msg + "\n";
+  document.getElementById("loadBtn").addEventListener("click", loadLandXML);
+
+  setStatus("Connected to Trimble Connect");
 }
 
-// ===============================
-// LOAD LANDXML (REAL PARSER 3D)
-// ===============================
-function loadXML() {
-
-    const file = document.getElementById("fileInput").files[0];
-    const reader = new FileReader();
-
-    reader.onload = function (e) {
-        alignment = parseLandXML(e.target.result);
-        log("LandXML loaded: " + alignment.length + " segments");
-    };
-
-    reader.readAsText(file);
+function setStatus(text) {
+  document.getElementById("status").innerText = text;
 }
 
-// ===============================
-// PARSE LANDXML (PntList3D)
-// ===============================
-function parseLandXML(text) {
+async function loadLandXML() {
+  const fileInput = document.getElementById("fileInput");
 
-    const parser = new DOMParser();
-    const xml = parser.parseFromString(text, "text/xml");
+  if (!fileInput.files.length) {
+    alert("Select a LandXML file first.");
+    return;
+  }
 
-    const coords = xml.getElementsByTagName("CoordGeom")[0];
-    const lines = coords.getElementsByTagName("Line");
+  const file = fileInput.files[0];
+  const text = await file.text();
 
-    const segments = [];
+  const parser = new DOMParser();
+  const xml = parser.parseFromString(text, "text/xml");
 
-    for (let line of lines) {
+  const alignments = xml.getElementsByTagName("Alignment");
 
-        const pntList = line.getElementsByTagName("PntList3D")[0];
-        if (!pntList) continue;
+  if (!alignments.length) {
+    setStatus("No Alignment found.");
+    return;
+  }
 
-        const values = pntList.textContent.trim().split(/\s+/);
+  const alignment = alignments[0];
 
-        for (let i = 0; i < values.length - 5; i += 3) {
+  setStatus(`Found alignment: ${alignment.getAttribute("name")}`);
 
-            const p1 = {
-                x: parseFloat(values[i + 1]),
-                y: parseFloat(values[i]),
-                z: parseFloat(values[i + 2])
-            };
+  const coordGeom = alignment.getElementsByTagName("CoordGeom")[0];
 
-            const p2 = {
-                x: parseFloat(values[i + 4]),
-                y: parseFloat(values[i + 3]),
-                z: parseFloat(values[i + 5])
-            };
+  if (!coordGeom) {
+    setStatus("No CoordGeom found.");
+    return;
+  }
 
-            segments.push({
-                p1,
-                p2,
-                length: distance3D(p1, p2)
-            });
-        }
+  const lines = coordGeom.getElementsByTagName("Line");
+
+  const points = [];
+
+  for (const line of lines) {
+    const start = line.getElementsByTagName("Start")[0]?.textContent.trim();
+    const end = line.getElementsByTagName("End")[0]?.textContent.trim();
+
+    if (!start || !end) continue;
+
+    const s = start.split(" ").map(Number);
+    const e = end.split(" ").map(Number);
+
+    points.push(s);
+    points.push(e);
+  }
+
+  if (!points.length) {
+    setStatus("No geometry points found.");
+    return;
+  }
+
+  drawStationing(points);
+}
+
+async function drawStationing(points) {
+
+  // Remove duplicate points
+  const unique = [];
+  const map = new Set();
+
+  for (const p of points) {
+    const key = p.join(",");
+
+    if (!map.has(key)) {
+      map.add(key);
+      unique.push(p);
     }
+  }
 
-    return segments;
+  let station = 0;
+
+  for (let i = 0; i < unique.length; i++) {
+
+    const p = unique[i];
+
+    const x = p[1];
+    const y = p[0];
+    const z = p[2] || 0;
+
+    const label = `STA ${station.toFixed(0)}`;
+
+    await createTextMarker(x, y, z, label);
+
+    station += 20;
+  }
+
+  setStatus("Stationing drawn.");
 }
 
-// ===============================
-// DISTANȚĂ 3D
-// ===============================
-function distance3D(a, b) {
-    return Math.sqrt(
-        Math.pow(b.x - a.x, 2) +
-        Math.pow(b.y - a.y, 2) +
-        Math.pow(b.z - a.z, 2)
-    );
+async function createTextMarker(x, y, z, text) {
+
+  // Minimal approach:
+  // Use viewpoint markup labels
+
+  const markup = {
+    color: "#ff0000",
+    start: {
+      positionX: x,
+      positionY: y,
+      positionZ: z
+    },
+    end: {
+      positionX: x,
+      positionY: y,
+      positionZ: z + 1
+    },
+    text: text
+  };
+
+  try {
+    await API.markup.addTextMarkup(markup);
+  }
+  catch (err) {
+    console.error(err);
+  }
 }
 
-// ===============================
-// GENERARE PICHEȚI (REAL 3D)
-// ===============================
-function generateStations(step = 20) {
-
-    stations = [];
-    let chainage = 0;
-
-    for (let seg of alignment) {
-
-        let dist = 0;
-
-        while (dist <= seg.length) {
-
-            const t = dist / seg.length;
-
-            const x = seg.p1.x + (seg.p2.x - seg.p1.x) * t;
-            const y = seg.p1.y + (seg.p2.y - seg.p1.y) * t;
-            const z = seg.p1.z + (seg.p2.z - seg.p1.z) * t;
-
-            stations.push({
-                x, y, z,
-                chainage: chainage + dist
-            });
-
-            dist += step;
-        }
-
-        chainage += seg.length;
-    }
-
-    // slope real
-    for (let i = 1; i < stations.length; i++) {
-
-        const dz = stations[i].z - stations[i - 1].z;
-        const dx = stations[i].chainage - stations[i - 1].chainage;
-
-        stations[i].slope = (dz / dx) * 100;
-    }
-
-    log("Stations: " + stations.length);
-}
-
-// ===============================
-// FORMAT KM
-// ===============================
-function formatChainage(ch) {
-
-    const km = Math.floor(ch / 1000);
-    const m = Math.floor(ch % 1000);
-
-    return `km ${km}+${m.toString().padStart(3, '0')}`;
-}
-
-// ===============================
-// DESEN AX
-// ===============================
-function drawAlignment() {
-
-    const lines = alignment.map(seg => ({
-        start: [seg.p1.x, seg.p1.y, seg.p1.z],
-        end: [seg.p2.x, seg.p2.y, seg.p2.z]
-    }));
-
-    viewer.addObjectOverlay({
-        id: "alignment",
-        lines: lines
-    });
-
-    log("Alignment drawn");
-}
-
-// ===============================
-// DESEN PICHEȚI + TEXT + PANTĂ
-// ===============================
-function drawStations() {
-
-    generateStations(20);
-
-    // puncte
-    viewer.addObjectOverlay({
-        id: "stations_points",
-        points: stations.map(s => ({
-            position: [s.x, s.y, s.z],
-            color: { r: 0, g: 0, b: 255 }
-        }))
-    });
-
-    // KM TEXT
-    viewer.addObjectOverlay({
-        id: "stations_labels",
-        texts: stations.map(s => ({
-            position: [s.x, s.y, s.z + 1],
-            text: formatChainage(s.chainage),
-            color: { r: 0, g: 0, b: 0 }
-        }))
-    });
-
-    // SLOPE TEXT + COLOR
-    viewer.addObjectOverlay({
-        id: "slope_labels",
-        texts: stations.map(s => ({
-            position: [s.x, s.y, s.z + 2],
-            text: s.slope ? s.slope.toFixed(2) + "%" : "",
-            color: s.slope >= 0
-                ? { r: 0, g: 150, b: 0 }
-                : { r: 200, g: 0, b: 0 }
-        }))
-    });
-
-    log("Stations drawn with slopes");
-}
+init();

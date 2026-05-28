@@ -1,22 +1,22 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <meta charset="utf-8">
-  <title>Civil Alignment</title>
+  <meta charset="UTF-8" />
+  <title>LandXML Stationing</title>
+
+  <script src="https://components.connect.trimble.com/trimble-connect-workspace-api/index.js"></script>
+
+  <link rel="stylesheet" href="style.css" />
 </head>
 <body>
 
-<h3>LandXML Loader</h3>
+  <div id="toolbar">
+    <input type="file" id="fileInput" accept=".xml,.landxml" />
+    <button id="loadBtn">Load Alignment</button>
+  </div>
 
-<input type="file" id="fileInput"/>
-<br><br>
+  <div id="status">Ready</div>
 
-<button onclick="loadXML()">Load LandXML</button>
-<button onclick="drawAlignment()">Draw AX</button>
-<button onclick="drawStations()">Draw Stations</button>
-
-<pre id="log"></pre>
-
-
+  <script src="app.js"></script>
 </body>
 </html>
