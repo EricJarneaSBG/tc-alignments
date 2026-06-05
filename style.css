@@ -8,26 +8,22 @@ body {
 }
 
 #container {
-    max-width: 400px;
-    margin: 0 auto;
-    padding: 20px;
+    width: 100%;
+    margin: 0;
+    padding: 10px;
     background: white;
-    box-shadow: 0 0 10px rgba(0,0,0,0.1);
+    box-sizing: border-box;
     min-height: 100vh;
 }
 
-header h1 {
-    font-size: 1.2rem;
-    color: #0078d4;
-    border-bottom: 2px solid #0078d4;
-    padding-bottom: 10px;
-    margin-top: 0;
+header {
+    width: 100%;
 }
 
 .tabs {
     display: flex;
     border-bottom: 1px solid #ddd;
-    margin-bottom: 20px;
+    margin-bottom: 15px;
 }
 
 .tab-btn {
@@ -47,20 +43,34 @@ header h1 {
     border-bottom-color: #0078d4;
 }
 
+.tab-content {
+    width: 100%;
+    box-sizing: border-box;
+}
+
 .tab-content.hidden {
-    display: none;
+    display: none !important;
 }
 
 #report-tab {
-    height: calc(100vh - 120px);
+    height: calc(100vh - 100px);
+    width: 100%;
     display: flex;
     flex-direction: column;
 }
 
 #pbi-report {
     width: 100%;
+    height: 100%;
     flex-grow: 1;
     border: none;
+}
+
+.controls {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin-bottom: 20px;
 }
 
 #file-picker-container {
@@ -77,21 +87,6 @@ header h1 {
     font-size: 0.9rem;
 }
 
-.button.small {
-    padding: 5px 10px;
-}
-
-.controls {
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-    margin-bottom: 20px;
-}
-
-input[type="file"] {
-    display: none;
-}
-
 .button {
     display: inline-block;
     padding: 10px 20px;
@@ -105,6 +100,10 @@ input[type="file"] {
     transition: background-color 0.2s;
 }
 
+.button.small {
+    padding: 5px 10px;
+}
+
 .button:hover {
     background-color: #005a9e;
 }
@@ -112,10 +111,6 @@ input[type="file"] {
 .button.secondary {
     background-color: #e1e1e1;
     color: #333;
-}
-
-.button.secondary:hover {
-    background-color: #d1d1d1;
 }
 
 #status-container {
@@ -133,10 +128,6 @@ input[type="file"] {
 
 #alignment-list {
     margin-top: 15px;
-}
-
-.hidden {
-    display: none;
 }
 
 .alignment-item {
@@ -162,13 +153,8 @@ input[type="file"] {
     gap: 8px;
 }
 
-#station-interval {
-    width: 60px;
-    padding: 4px;
-}
-
 footer {
-    margin-top: 30px;
+    margin-top: 20px;
     font-size: 0.75rem;
     color: #999;
     text-align: center;

@@ -77,78 +77,106 @@ clearBtn.addEventListener('click', clearMarkups);
 function updateStatus(text) { statusText.innerText = text; }
 
 /**
- * Robust Project File Loader
- * Tries multiple methods to bypass regional 403/404 issues.
+ * Super-Robust Project File Loader
+ * Addresses the 403 Forbidden / USER_NOT_IN_PROJECT error by brute-forcing regions
+ * and trying multiple REST API strategies.
  */
 async function loadProjectFiles() {
     if (!TC_API) return;
-    updateStatus("Loading project files...");
+    updateStatus("Searching for project files...");
     projectFilesDropdown.innerHTML = '<option value="">-- Loading... --</option>';
 
     try {
         const project = await TC_API.project.getProject();
         const token = await TC_API.extension.requestPermission("accesstoken");
         
+        console.log("Starting file discovery for project:", project.id);
+
         const endpoints = [
+            "https://app21.connect.trimble.com/tc/api/2.0",
             "https://app.connect.trimble.com/tc/api/2.0",
-            "https://app21.connect.trimble.com/tc/api/2.0"
+            "https://app31.connect.trimble.com/tc/api/2.0"
         ];
 
-        // Ensure we try both, but prioritize based on project location
-        if (project.location === "europe" || project.location === "europe-west") endpoints.reverse();
+        let foundItems = [];
+        let successBaseUrl = "";
 
-        let items = [];
-        let baseUrlUsed = "";
-
+        // Strategy: Try listing project root directly on ALL endpoints
+        // One of these WILL eventually respond with the file list.
         for (const baseUrl of endpoints) {
-            console.log(`Checking API: ${baseUrl}`);
+            console.log(`Trying ${baseUrl}...`);
             try {
-                // Try 1: Get root folder directly via /projects/{id}
-                const pResp = await fetch(`${baseUrl}/projects/${project.id}`, {
-                    headers: { 'Authorization': `Bearer ${token}` }
-                });
-                
-                let folderId = project.id;
-                if (pResp.ok) {
-                    const pData = await pResp.json();
-                    folderId = pData.rootFolderId || folderId;
-                }
-
-                // Try 2: List items
-                const response = await fetch(`${baseUrl}/folders/${folderId}/items`, {
-                    headers: { 'Authorization': `Bearer ${token}`, 'Range': 'items=0-200' }
+                // 1. First, try to list items in project root folder (usually project ID)
+                const response = await fetch(`${baseUrl}/folders/${project.id}/items`, {
+                    headers: { 
+                        'Authorization': `Bearer ${token}`,
+                        'Range': 'items=0-500'
+                    }
                 });
 
                 if (response.ok) {
-                    items = await response.json();
-                    baseUrlUsed = baseUrl;
-                    break;
+                    const data = await response.json();
+                    if (Array.isArray(data) && data.length > 0) {
+                        foundItems = data;
+                        successBaseUrl = baseUrl;
+                        console.log(`Successfully fetched ${data.length} items from ${baseUrl}`);
+                        break;
+                    }
+                } else if (response.status === 403 || response.status === 404) {
+                    // Try alternative: Fetch project info first to get rootFolderId
+                    console.log(`Root listing failed on ${baseUrl}. Fetching project info...`);
+                    const pResp = await fetch(`${baseUrl}/projects/${project.id}`, {
+                        headers: { 'Authorization': `Bearer ${token}` }
+                    });
+                    
+                    if (pResp.ok) {
+                        const pData = await pResp.json();
+                        const rootId = pData.rootFolderId;
+                        if (rootId && rootId !== project.id) {
+                            console.log(`Found explicit rootFolderId: ${rootId}. Retrying list...`);
+                            const rResp = await fetch(`${baseUrl}/folders/${rootId}/items`, {
+                                headers: { 'Authorization': `Bearer ${token}`, 'Range': 'items=0-500' }
+                            });
+                            if (rResp.ok) {
+                                foundItems = await rResp.json();
+                                successBaseUrl = baseUrl;
+                                break;
+                            }
+                        }
+                    }
                 }
-            } catch (e) { console.warn(`Error with ${baseUrl}:`, e); }
+            } catch (err) {
+                console.warn(`Endpoint ${baseUrl} failed:`, err);
+            }
         }
 
-        if (items.length === 0) {
-            // Fallback: Try searching for XMLs in the project if the folder list failed
-            updateStatus("Retrying file search...");
-            // This is a last resort if standard folder listing is forbidden
+        if (foundItems.length > 0) {
+            populateFiles(foundItems, successBaseUrl);
+        } else {
+            updateStatus("No LandXML files found in root folder.");
+            projectFilesDropdown.innerHTML = '<option value="">-- No XMLs --</option>';
         }
 
-        const landXmlFiles = items.filter(i => i.type === 'FILE' && (i.name.toLowerCase().endsWith('.xml') || i.name.toLowerCase().endsWith('.landxml')));
-        projectFilesDropdown.innerHTML = landXmlFiles.length > 0 ? '<option value="">-- Select LandXML --</option>' : '<option value="">-- No XMLs Found --</option>';
-        
-        landXmlFiles.forEach(file => {
-            const opt = document.createElement('option');
-            opt.value = file.id;
-            opt.textContent = file.name;
-            opt.dataset.baseUrl = baseUrlUsed;
-            projectFilesDropdown.appendChild(opt);
-        });
-
-        updateStatus(`Found ${landXmlFiles.length} LandXML files.`);
     } catch (e) {
         console.error("Load files error:", e);
-        updateStatus("Error: Access denied or project not found.");
+        updateStatus("Error: Access denied to project data.");
     }
+}
+
+function populateFiles(items, baseUrl) {
+    const landXmlFiles = items.filter(i => i.type === 'FILE' && (i.name.toLowerCase().endsWith('.xml') || i.name.toLowerCase().endsWith('.landxml')));
+
+    projectFilesDropdown.innerHTML = landXmlFiles.length > 0 ? '<option value="">-- Select LandXML --</option>' : '<option value="">-- No XMLs Found --</option>';
+    
+    landXmlFiles.forEach(file => {
+        const opt = document.createElement('option');
+        opt.value = file.id;
+        opt.textContent = file.name;
+        opt.dataset.baseUrl = baseUrl;
+        projectFilesDropdown.appendChild(opt);
+    });
+
+    updateStatus(`Found ${landXmlFiles.length} LandXML files.`);
 }
 
 async function handleFileSelection() {
@@ -157,7 +185,7 @@ async function handleFileSelection() {
     const selectedOption = projectFilesDropdown.selectedOptions[0];
     const baseUrl = selectedOption.dataset.baseUrl;
 
-    updateStatus(`Fetching XML content...`);
+    updateStatus(`Downloading alignment data...`);
     try {
         const token = await TC_API.extension.requestPermission("accesstoken");
         const dlResponse = await fetch(`${baseUrl}/files/${fileId}/downloadUrl`, {
