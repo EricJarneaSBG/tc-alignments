@@ -1,6 +1,8 @@
 /**
  * LandXML Alignment Visualizer for Trimble Connect
  */
+const VERSION = "v1.0.5";
+console.log(`Alignment Visualizer ${VERSION} loaded.`);
 
 let TC_API = null;
 let alignments = [];
@@ -69,7 +71,7 @@ async function initTC() {
 reloadFilesBtn.addEventListener('click', loadProjectFiles);
 projectFilesDropdown.addEventListener('change', handleFileSelection);
 drawBtn.addEventListener('click', async () => {
-    updateStatus("Clearing and drawing...");
+    updateStatus("Preparing viewer...");
     await clearMarkups();
     await new Promise(r => setTimeout(r, 200)); 
     await drawSelectedAlignments();
@@ -94,12 +96,11 @@ async function loadProjectFiles() {
         const baseUrl = "https://app21.connect.trimble.com/tc/api/2.0";
         console.log(`Region focus: app21. Project ID: ${projectInfo.id}`);
 
-        // 1. First, fetch the full project list to see if the project is visible and get its root folder
-        // This often refreshes the regional token authorization
+        // 1. Fetch the full project list to get its root folder (often named 'rootId')
         const projectsResp = await fetch(`${baseUrl}/projects`, {
             headers: { 
                 'Authorization': `Bearer ${token}`,
-                'Range': 'items=0-100'
+                'Range': 'items=0-200'
             }
         });
 
@@ -110,21 +111,11 @@ async function loadProjectFiles() {
             console.log("Found project in list:", targetProject);
         }
 
-        // 2. If not found in list, try direct project fetch
-        if (!targetProject) {
-            const directResp = await fetch(`${baseUrl}/projects/${projectInfo.id}`, {
-                headers: { 'Authorization': `Bearer ${token}` }
-            });
-            if (directResp.ok) {
-                targetProject = await directResp.json();
-            }
-        }
-
-        // 3. Determine the folder ID to list (Root Folder is key)
-        const folderId = targetProject ? targetProject.rootFolderId : projectInfo.id;
+        // 2. Determine the folder ID to list (Try rootId, then rootFolderId, fallback to project ID)
+        const folderId = targetProject ? (targetProject.rootId || targetProject.rootFolderId || projectInfo.id) : projectInfo.id;
         console.log(`Listing items for folder: ${folderId}`);
 
-        // 4. List items with the mandatory Range header
+        // 3. List items
         const response = await fetch(`${baseUrl}/folders/${folderId}/items`, {
             headers: { 
                 'Authorization': `Bearer ${token}`,
@@ -154,7 +145,7 @@ async function loadProjectFiles() {
     } catch (e) {
         console.error("Load files error:", e);
         updateStatus("Error: " + e.message);
-        projectFilesDropdown.innerHTML = '<option value="">-- Access Denied --</option>';
+        projectFilesDropdown.innerHTML = '<option value="">-- Error --</option>';
     }
 }
 
@@ -276,10 +267,8 @@ function processAlignment(align, settings) {
     if (!cg) return { lines, texts };
     for (const child of cg.children) {
         if (child.tagName === 'Line') {
-            const sText = child.getElementsByTagName('Start')[0]?.textContent;
-            const eText = child.getElementsByTagName('End')[0]?.textContent;
-            const s = parseCoord(sText, settings.swap);
-            const e = parseCoord(eText, settings.swap);
+            const s = parseCoord(child.getElementsByTagName('Start')[0]?.textContent, settings.swap);
+            const e = parseCoord(child.getElementsByTagName('End')[0]?.textContent, settings.swap);
             const sta = parseFloat(child.getAttribute('staStart')), len = parseFloat(child.getAttribute('length'));
             if (s && e) { points.push({ ...s, sta: sta }); points.push({ ...e, sta: sta + len }); }
         } else if (child.tagName === 'Curve') {
