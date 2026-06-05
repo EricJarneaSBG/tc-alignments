@@ -4,31 +4,35 @@ body {
     padding: 0;
     background-color: #f4f4f4;
     color: #333;
-    overflow-x: hidden;
+    overflow: hidden; /* Prevent body scroll, use tab scrolling */
 }
 
 #container {
     width: 100%;
+    height: 100vh;
     margin: 0;
-    padding: 10px;
+    padding: 0;
     background: white;
     box-sizing: border-box;
-    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
 }
 
 header {
     width: 100%;
+    background: #fff;
+    z-index: 10;
 }
 
 .tabs {
     display: flex;
     border-bottom: 1px solid #ddd;
-    margin-bottom: 15px;
+    margin-bottom: 0;
 }
 
 .tab-btn {
     flex: 1;
-    padding: 10px;
+    padding: 15px 10px;
     border: none;
     background: none;
     cursor: pointer;
@@ -36,6 +40,7 @@ header {
     color: #666;
     border-bottom: 3px solid transparent;
     transition: all 0.2s;
+    font-size: 0.9rem;
 }
 
 .tab-btn.active {
@@ -43,27 +48,41 @@ header {
     border-bottom-color: #0078d4;
 }
 
+main {
+    flex-grow: 1;
+    width: 100%;
+    overflow-y: auto;
+    position: relative;
+}
+
 .tab-content {
     width: 100%;
+    height: 100%;
     box-sizing: border-box;
+}
+
+#alignment-tab {
+    padding: 20px;
+}
+
+#report-tab {
+    height: 100%;
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    padding: 0;
+    margin: 0;
 }
 
 .tab-content.hidden {
     display: none !important;
 }
 
-#report-tab {
-    height: calc(100vh - 100px);
-    width: 100%;
-    display: flex;
-    flex-direction: column;
-}
-
 #pbi-report {
     width: 100%;
     height: 100%;
-    flex-grow: 1;
     border: none;
+    display: block;
 }
 
 .controls {
@@ -81,15 +100,15 @@ header {
 
 #project-files {
     flex-grow: 1;
-    padding: 8px;
+    padding: 10px;
     border: 1px solid #ccc;
     border-radius: 4px;
-    font-size: 0.9rem;
+    font-size: 1rem;
 }
 
 .button {
     display: inline-block;
-    padding: 10px 20px;
+    padding: 12px 20px;
     background-color: #0078d4;
     color: white;
     text-align: center;
@@ -100,62 +119,69 @@ header {
     transition: background-color 0.2s;
 }
 
-.button.small {
-    padding: 5px 10px;
-}
-
 .button:hover {
     background-color: #005a9e;
 }
 
 .button.secondary {
-    background-color: #e1e1e1;
+    background-color: #f0f0f0;
     color: #333;
 }
 
 #status-container {
     margin-bottom: 20px;
-    padding: 10px;
+    padding: 12px;
     background: #f9f9f9;
     border-radius: 4px;
     border-left: 4px solid #0078d4;
 }
 
 #status {
-    font-size: 0.9rem;
+    font-size: 0.95rem;
     margin: 0;
 }
 
 #alignment-list {
     margin-top: 15px;
+    border: 1px solid #eee;
+    padding: 10px;
+    border-radius: 4px;
 }
 
 .alignment-item {
     display: flex;
     align-items: center;
     gap: 10px;
-    padding: 5px 0;
-    font-size: 0.9rem;
+    padding: 8px 0;
+    border-bottom: 1px solid #f9f9f9;
 }
 
 .settings {
-    font-size: 0.85rem;
+    font-size: 0.9rem;
     border-top: 1px solid #eee;
     padding-top: 15px;
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: 12px;
+    margin-bottom: 40px;
 }
 
 .settings label {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 10px;
+}
+
+#station-interval {
+    width: 80px;
+    padding: 6px;
 }
 
 footer {
-    margin-top: 20px;
+    padding: 10px;
     font-size: 0.75rem;
     color: #999;
     text-align: center;
+    border-top: 1px solid #eee;
+    background: #fff;
 }

@@ -56,6 +56,8 @@ async function initTC() {
 
         TC_API = await ApiObject.connect(window.parent, (event, data) => {}, 30000);
         updateStatus("Connected to Trimble Connect.");
+        
+        // Initial load
         await loadProjectFiles();
     } catch (e) {
         console.error("Failed to connect to TC:", e);
@@ -77,106 +79,83 @@ clearBtn.addEventListener('click', clearMarkups);
 function updateStatus(text) { statusText.innerText = text; }
 
 /**
- * Super-Robust Project File Loader
- * Addresses the 403 Forbidden / USER_NOT_IN_PROJECT error by brute-forcing regions
- * and trying multiple REST API strategies.
+ * Enhanced Project File Loader for Europe (app21)
+ * Addresses the 403 Forbidden error by discovering the correct Root Folder ID.
  */
 async function loadProjectFiles() {
     if (!TC_API) return;
-    updateStatus("Searching for project files...");
+    updateStatus("Accessing project files...");
     projectFilesDropdown.innerHTML = '<option value="">-- Loading... --</option>';
 
     try {
-        const project = await TC_API.project.getProject();
+        const projectInfo = await TC_API.project.getProject();
         const token = await TC_API.extension.requestPermission("accesstoken");
         
-        console.log("Starting file discovery for project:", project.id);
+        const baseUrl = "https://app21.connect.trimble.com/tc/api/2.0";
+        console.log(`Region focus: app21. Project ID: ${projectInfo.id}`);
 
-        const endpoints = [
-            "https://app21.connect.trimble.com/tc/api/2.0",
-            "https://app.connect.trimble.com/tc/api/2.0",
-            "https://app31.connect.trimble.com/tc/api/2.0"
-        ];
+        // 1. First, fetch the full project list to see if the project is visible and get its root folder
+        // This often refreshes the regional token authorization
+        const projectsResp = await fetch(`${baseUrl}/projects`, {
+            headers: { 
+                'Authorization': `Bearer ${token}`,
+                'Range': 'items=0-100'
+            }
+        });
 
-        let foundItems = [];
-        let successBaseUrl = "";
+        let targetProject = null;
+        if (projectsResp.ok) {
+            const projects = await projectsResp.json();
+            targetProject = projects.find(p => p.id === projectInfo.id);
+            console.log("Found project in list:", targetProject);
+        }
 
-        // Strategy: Try listing project root directly on ALL endpoints
-        // One of these WILL eventually respond with the file list.
-        for (const baseUrl of endpoints) {
-            console.log(`Trying ${baseUrl}...`);
-            try {
-                // 1. First, try to list items in project root folder (usually project ID)
-                const response = await fetch(`${baseUrl}/folders/${project.id}/items`, {
-                    headers: { 
-                        'Authorization': `Bearer ${token}`,
-                        'Range': 'items=0-500'
-                    }
-                });
-
-                if (response.ok) {
-                    const data = await response.json();
-                    if (Array.isArray(data) && data.length > 0) {
-                        foundItems = data;
-                        successBaseUrl = baseUrl;
-                        console.log(`Successfully fetched ${data.length} items from ${baseUrl}`);
-                        break;
-                    }
-                } else if (response.status === 403 || response.status === 404) {
-                    // Try alternative: Fetch project info first to get rootFolderId
-                    console.log(`Root listing failed on ${baseUrl}. Fetching project info...`);
-                    const pResp = await fetch(`${baseUrl}/projects/${project.id}`, {
-                        headers: { 'Authorization': `Bearer ${token}` }
-                    });
-                    
-                    if (pResp.ok) {
-                        const pData = await pResp.json();
-                        const rootId = pData.rootFolderId;
-                        if (rootId && rootId !== project.id) {
-                            console.log(`Found explicit rootFolderId: ${rootId}. Retrying list...`);
-                            const rResp = await fetch(`${baseUrl}/folders/${rootId}/items`, {
-                                headers: { 'Authorization': `Bearer ${token}`, 'Range': 'items=0-500' }
-                            });
-                            if (rResp.ok) {
-                                foundItems = await rResp.json();
-                                successBaseUrl = baseUrl;
-                                break;
-                            }
-                        }
-                    }
-                }
-            } catch (err) {
-                console.warn(`Endpoint ${baseUrl} failed:`, err);
+        // 2. If not found in list, try direct project fetch
+        if (!targetProject) {
+            const directResp = await fetch(`${baseUrl}/projects/${projectInfo.id}`, {
+                headers: { 'Authorization': `Bearer ${token}` }
+            });
+            if (directResp.ok) {
+                targetProject = await directResp.json();
             }
         }
 
-        if (foundItems.length > 0) {
-            populateFiles(foundItems, successBaseUrl);
-        } else {
-            updateStatus("No LandXML files found in root folder.");
-            projectFilesDropdown.innerHTML = '<option value="">-- No XMLs --</option>';
+        // 3. Determine the folder ID to list (Root Folder is key)
+        const folderId = targetProject ? targetProject.rootFolderId : projectInfo.id;
+        console.log(`Listing items for folder: ${folderId}`);
+
+        // 4. List items with the mandatory Range header
+        const response = await fetch(`${baseUrl}/folders/${folderId}/items`, {
+            headers: { 
+                'Authorization': `Bearer ${token}`,
+                'Range': 'items=0-500'
+            }
+        });
+
+        if (!response.ok) {
+            const errText = await response.text();
+            throw new Error(`API ${response.status}: ${errText}`);
         }
 
+        const items = await response.json();
+        const landXmlFiles = items.filter(i => i.type === 'FILE' && (i.name.toLowerCase().endsWith('.xml') || i.name.toLowerCase().endsWith('.landxml')));
+        
+        projectFilesDropdown.innerHTML = landXmlFiles.length > 0 ? '<option value="">-- Select LandXML --</option>' : '<option value="">-- No XMLs Found --</option>';
+        
+        landXmlFiles.forEach(file => {
+            const opt = document.createElement('option');
+            opt.value = file.id;
+            opt.textContent = file.name;
+            opt.dataset.baseUrl = baseUrl;
+            projectFilesDropdown.appendChild(opt);
+        });
+
+        updateStatus(`Found ${landXmlFiles.length} LandXML files.`);
     } catch (e) {
         console.error("Load files error:", e);
-        updateStatus("Error: Access denied to project data.");
+        updateStatus("Error: " + e.message);
+        projectFilesDropdown.innerHTML = '<option value="">-- Access Denied --</option>';
     }
-}
-
-function populateFiles(items, baseUrl) {
-    const landXmlFiles = items.filter(i => i.type === 'FILE' && (i.name.toLowerCase().endsWith('.xml') || i.name.toLowerCase().endsWith('.landxml')));
-
-    projectFilesDropdown.innerHTML = landXmlFiles.length > 0 ? '<option value="">-- Select LandXML --</option>' : '<option value="">-- No XMLs Found --</option>';
-    
-    landXmlFiles.forEach(file => {
-        const opt = document.createElement('option');
-        opt.value = file.id;
-        opt.textContent = file.name;
-        opt.dataset.baseUrl = baseUrl;
-        projectFilesDropdown.appendChild(opt);
-    });
-
-    updateStatus(`Found ${landXmlFiles.length} LandXML files.`);
 }
 
 async function handleFileSelection() {
@@ -297,8 +276,10 @@ function processAlignment(align, settings) {
     if (!cg) return { lines, texts };
     for (const child of cg.children) {
         if (child.tagName === 'Line') {
-            const s = parseCoord(child.getElementsByTagName('Start')[0]?.textContent, settings.swap);
-            const e = parseCoord(child.getElementsByTagName('End')[0]?.textContent, settings.swap);
+            const sText = child.getElementsByTagName('Start')[0]?.textContent;
+            const eText = child.getElementsByTagName('End')[0]?.textContent;
+            const s = parseCoord(sText, settings.swap);
+            const e = parseCoord(eText, settings.swap);
             const sta = parseFloat(child.getAttribute('staStart')), len = parseFloat(child.getAttribute('length'));
             if (s && e) { points.push({ ...s, sta: sta }); points.push({ ...e, sta: sta + len }); }
         } else if (child.tagName === 'Curve') {
@@ -372,7 +353,8 @@ function dist(p1, p2) { return Math.sqrt(Math.pow(p1.x-p2.x, 2) + Math.pow(p1.y-
 function parseCoord(str, swap) {
     if (!str) return null;
     const pts = str.trim().split(/\s+/);
-    return swap ? { x: parseFloat(pts[1]), y: parseFloat(pts[0]) } : { x: parseFloat(pts[0]), y: parseFloat(pts[1]) };
+    const x = parseFloat(pts[0]), y = parseFloat(pts[1]);
+    return swap ? { x: y, y: x } : { x: x, y: y };
 }
 function interpolate(pts, s) {
     if (!pts.length) return null;
