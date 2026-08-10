@@ -2,7 +2,7 @@
  * LandXML Alignment Stationing for Trimble Connect
  * Station ticks/labels from LandXML; list labels use Alignment desc when present.
  */
-const VERSION = "v1.2.3";
+const VERSION = "v1.2.4";
 console.log(`Alignment Stationing ${VERSION} loaded.`);
 
 const REGION_BASES = {
@@ -33,15 +33,15 @@ const MAX_FOLDERS = 200;
 
 /** Label styling — TC TextMarkup only supports text + color + start/end (size ≈ |end-start|). */
 const LABEL = {
-    stationColor: { r: 245, g: 245, b: 245, a: 1 },
-    terminusColor: { r: 255, g: 193, b: 7, a: 1 },
-    tickColor: { r: 176, g: 190, b: 197, a: 0.95 },
-    terminusTickColor: { r: 255, g: 160, b: 0, a: 1 },
-    textHeightM: 2.2,
-    liftM: 0.35,
-    offsetM: 2.5,
-    tickHalfM: 0.55,
-    terminusTickHalfM: 0.95,
+    // Dark colors for Trimble's light viewer background
+    stationColor: { r: 0, g: 105, b: 170, a: 1 },
+    terminusColor: { r: 200, g: 80, b: 0, a: 1 },
+    tickColor: { r: 0, g: 105, b: 170, a: 1 },
+    terminusTickColor: { r: 200, g: 80, b: 0, a: 1 },
+    textHeightM: 1.8,
+    liftM: 0.8,
+    tickHalfM: 1.0,
+    terminusTickHalfM: 1.6,
     dedupeCellM: 1.25
 };
 
@@ -1037,10 +1037,9 @@ function processAlignment(align, settings, occupied = new Set()) {
             const { p, nx, ny } = frame;
             const el = getEl(s);
             const isTerminus = kind === "start" || kind === "end";
-            const side = isTerminus ? LABEL.offsetM * 1.15 : LABEL.offsetM;
-            const lx = p.x + nx * side;
-            const ly = p.y + ny * side;
-            const cell = labelCellKey(lx, ly, el);
+            const color = isTerminus ? LABEL.terminusColor : LABEL.stationColor;
+            const tickColor = isTerminus ? LABEL.terminusTickColor : LABEL.tickColor;
+            const cell = labelCellKey(p.x, p.y, el);
 
             if (settings.drawText) {
                 if (!occupied.has(cell)) {
@@ -1055,18 +1054,36 @@ function processAlignment(align, settings, occupied = new Set()) {
                     texts.push({
                         id: idCounter++,
                         text: label,
-                        color: isTerminus ? LABEL.terminusColor : LABEL.stationColor,
+                        color,
                         start: {
-                            positionX: lx * MM,
-                            positionY: ly * MM,
+                            positionX: p.x * MM,
+                            positionY: p.y * MM,
                             positionZ: z0 * MM
                         },
                         end: {
-                            positionX: lx * MM,
-                            positionY: ly * MM,
+                            positionX: p.x * MM,
+                            positionY: p.y * MM,
                             positionZ: (z0 + LABEL.textHeightM) * MM
                         }
                     });
+
+                    // Short vertical stub from alignment up to the label base
+                    if (LABEL.liftM > 0.05) {
+                        lines.push({
+                            id: idCounter++,
+                            color: tickColor,
+                            start: {
+                                positionX: p.x * MM,
+                                positionY: p.y * MM,
+                                positionZ: el * MM
+                            },
+                            end: {
+                                positionX: p.x * MM,
+                                positionY: p.y * MM,
+                                positionZ: z0 * MM
+                            }
+                        });
+                    }
                 }
             }
 
@@ -1074,7 +1091,7 @@ function processAlignment(align, settings, occupied = new Set()) {
                 const tL = isTerminus ? LABEL.terminusTickHalfM : LABEL.tickHalfM;
                 lines.push({
                     id: idCounter++,
-                    color: isTerminus ? LABEL.terminusTickColor : LABEL.tickColor,
+                    color: tickColor,
                     start: {
                         positionX: (p.x - nx * tL) * MM,
                         positionY: (p.y - ny * tL) * MM,
