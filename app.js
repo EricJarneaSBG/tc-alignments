@@ -2,7 +2,7 @@
  * LandXML Alignment Stationing for Trimble Connect
  * Station ticks/labels from LandXML; list labels use Alignment desc when present.
  */
-const VERSION = "v1.2.2";
+const VERSION = "v1.2.3";
 console.log(`Alignment Stationing ${VERSION} loaded.`);
 
 const REGION_BASES = {
@@ -26,9 +26,24 @@ const FALLBACK_BASES = [
 ];
 
 const MM = 1000;
-const BATCH = 40;
+const BATCH = 120;
+const CLEAR_CHUNK = 400;
 const MAX_FOLDER_DEPTH = 8;
 const MAX_FOLDERS = 200;
+
+/** Label styling — TC TextMarkup only supports text + color + start/end (size ≈ |end-start|). */
+const LABEL = {
+    stationColor: { r: 245, g: 245, b: 245, a: 1 },
+    terminusColor: { r: 255, g: 193, b: 7, a: 1 },
+    tickColor: { r: 176, g: 190, b: 197, a: 0.95 },
+    terminusTickColor: { r: 255, g: 160, b: 0, a: 1 },
+    textHeightM: 2.2,
+    liftM: 0.35,
+    offsetM: 2.5,
+    tickHalfM: 0.55,
+    terminusTickHalfM: 0.95,
+    dedupeCellM: 1.25
+};
 
 const SWAP_NE = true;
 
@@ -623,10 +638,12 @@ function setAllChecks(checked) {
 
 async function clearMarkups() {
     if (!TC_API || !TC_API.markup) return;
+    const count = activeMarkupIds.length;
     setBusy(true);
+    updateStatus(count ? `Clearing ${count} labels…` : "Clearing labels…", "info");
     try {
         await clearMarkupsInternal();
-        updateStatus("Viewer markups cleared.", "success");
+        updateStatus("Labels cleared.", "success");
     } catch (e) {
         console.error("Clear failed:", e);
         activeMarkupIds = [];
@@ -658,7 +675,7 @@ async function drawSelectedAlignments() {
     }
 
     setBusy(true);
-    updateStatus("Clearing previous markups…", "info");
+    updateStatus("Clearing previous labels…", "info");
     try {
         try {
             await clearMarkupsInternal();
@@ -666,13 +683,13 @@ async function drawSelectedAlignments() {
             console.warn("Pre-draw clear warning:", e);
             activeMarkupIds = [];
         }
-        await new Promise((r) => setTimeout(r, 150));
 
         updateStatus("Building geometry…", "info");
         const lines = [];
         const texts = [];
+        const occupied = new Set();
         for (const id of selectedIds) {
-            const geom = processAlignment(alignments[id], settings);
+            const geom = processAlignment(alignments[id], settings, occupied);
             lines.push(...geom.lines);
             texts.push(...geom.texts);
         }
@@ -682,7 +699,7 @@ async function drawSelectedAlignments() {
             return;
         }
 
-        updateStatus(`Drawing ${lines.length} lines, ${texts.length} labels…`, "info");
+        updateStatus(`Drawing ${texts.length} labels, ${lines.length} ticks…`, "info");
         await addMarkups(lines, texts);
         updateStatus(
             `Applied stationing to ${selectedIds.length} alignment${selectedIds.length === 1 ? "" : "s"} (${texts.length} labels).`,
@@ -701,19 +718,28 @@ async function clearMarkupsInternal() {
     const removeFn = TC_API.markup.removeMarkups || TC_API.markup.removeLineMarkups;
     if (!removeFn) throw new Error("Clear is not supported by this viewer API.");
 
-    if (activeMarkupIds.length > 0) {
-        for (let i = 0; i < activeMarkupIds.length; i += 100) {
-            await removeFn.call(TC_API.markup, activeMarkupIds.slice(i, i + 100));
-        }
-    } else if (TC_API.markup.removeMarkups) {
-        // Ids were lost — clear all viewer markups as a fallback
-        await TC_API.markup.removeMarkups(undefined);
-    }
+    const ids = activeMarkupIds.filter((id) => id != null);
     activeMarkupIds = [];
+    if (!ids.length) return;
+
+    // One shot when possible — sequential small batches were very slow with 29 alignments.
+    try {
+        await removeFn.call(TC_API.markup, ids);
+        return;
+    } catch (err) {
+        console.warn("Bulk clear failed, retrying in parallel chunks:", err);
+    }
+
+    const jobs = [];
+    for (let i = 0; i < ids.length; i += CLEAR_CHUNK) {
+        jobs.push(removeFn.call(TC_API.markup, ids.slice(i, i + CLEAR_CHUNK)));
+    }
+    await Promise.all(jobs);
 }
 
 async function addMarkups(lines, texts) {
     const addBatch = async (items, singular, plural) => {
+        if (!items.length) return;
         for (let i = 0; i < items.length; i += BATCH) {
             const batch = items.slice(i, i + BATCH);
             let res;
@@ -736,20 +762,40 @@ async function addMarkups(lines, texts) {
     };
 
     await addBatch(lines, TC_API.markup.addLineMarkup, TC_API.markup.addLineMarkups);
-    // Workspace API documents addTextMarkup taking an array
     await addBatch(texts, null, TC_API.markup.addTextMarkup || TC_API.markup.addTextMarkups);
 }
 
-function formatStation(s) {
+function formatStation(s, { decimals = 0 } = {}) {
     if (!isFinite(s)) return "0+000";
     const sign = s < 0 ? "-" : "";
     const abs = Math.abs(s);
     const km = Math.floor(abs / 1000);
     const meters = abs - km * 1000;
+    if (decimals <= 0) {
+        return `${sign}${km}+${String(Math.round(meters)).padStart(3, "0")}`;
+    }
     const whole = Math.floor(meters);
-    const frac = Math.round((meters - whole) * 1000);
+    const frac = Math.round((meters - whole) * Math.pow(10, decimals));
     const base = `${km}+${String(whole).padStart(3, "0")}`;
-    return sign + (frac ? `${base}.${String(frac).padStart(3, "0")}` : base);
+    if (!frac) return sign + base;
+    return `${sign}${base}.${String(frac).padStart(decimals, "0")}`;
+}
+
+function labelCellKey(x, y, z) {
+    const c = LABEL.dedupeCellM;
+    return `${Math.round(x / c)}_${Math.round(y / c)}_${Math.round(z / c)}`;
+}
+
+function tangentNormal(points, s) {
+    const p = interpolate(points, s);
+    if (!p) return null;
+    const pN = interpolate(points, s + 0.25) || interpolate(points, s - 0.25);
+    if (!pN) return { p, nx: 0, ny: 1 };
+    const dx = pN.x - p.x;
+    const dy = pN.y - p.y;
+    const len = Math.hypot(dx, dy);
+    if (len < 1e-6) return { p, nx: 0, ny: 1 };
+    return { p, nx: -dy / len, ny: dx / len };
 }
 
 function parseCoord(str, swap) {
@@ -962,7 +1008,7 @@ function makeElevFn(pvis) {
     };
 }
 
-function processAlignment(align, settings) {
+function processAlignment(align, settings, occupied = new Set()) {
     const lines = [];
     const texts = [];
     const points = collectGeomPoints(align, settings.swap);
@@ -973,62 +1019,73 @@ function processAlignment(align, settings) {
     if (settings.drawSta || settings.drawText) {
         const sSta = points[0].sta || 0;
         const eSta = points[points.length - 1].sta || 0;
-        const stations = [sSta];
+        const stations = [];
         const startTick = Math.ceil((sSta + 0.001) / settings.interval) * settings.interval;
-        for (let s = startTick; s < eSta - 0.001; s += settings.interval) stations.push(s);
-        if (eSta > sSta + 0.01) stations.push(eSta);
+        for (let s = startTick; s < eSta - 0.001; s += settings.interval) stations.push({ s, kind: "station" });
 
-        for (const s of stations) {
-            const p = interpolate(points, s);
-            if (!p) continue;
+        // Only add termini when they are not already covered by an interval station
+        if (stations.every((st) => Math.abs(st.s - sSta) > 0.05)) {
+            stations.unshift({ s: sSta, kind: "start" });
+        }
+        if (eSta > sSta + 0.01 && stations.every((st) => Math.abs(st.s - eSta) > 0.05)) {
+            stations.push({ s: eSta, kind: "end" });
+        }
+
+        for (const { s, kind } of stations) {
+            const frame = tangentNormal(points, s);
+            if (!frame) continue;
+            const { p, nx, ny } = frame;
             const el = getEl(s);
-            const pos = { positionX: p.x * MM, positionY: p.y * MM, positionZ: el * MM };
-            const isEnd = s === sSta || s === eSta;
-            const color = isEnd
-                ? { r: 255, g: 120, b: 0, a: 1 }
-                : { r: 0, g: 200, b: 220, a: 1 };
+            const isTerminus = kind === "start" || kind === "end";
+            const side = isTerminus ? LABEL.offsetM * 1.15 : LABEL.offsetM;
+            const lx = p.x + nx * side;
+            const ly = p.y + ny * side;
+            const cell = labelCellKey(lx, ly, el);
 
             if (settings.drawText) {
-                const label = isEnd
-                    ? s === sSta
-                        ? `START ${formatStation(s)}`
-                        : `END ${formatStation(s)}`
-                    : formatStation(s);
-                texts.push({
-                    id: idCounter++,
-                    text: label,
-                    color,
-                    start: pos,
-                    end: { ...pos, positionZ: (el + 1.5) * MM }
-                });
+                if (!occupied.has(cell)) {
+                    occupied.add(cell);
+                    const label =
+                        kind === "start"
+                            ? `S ${formatStation(s)}`
+                            : kind === "end"
+                              ? `E ${formatStation(s, { decimals: 1 })}`
+                              : formatStation(s);
+                    const z0 = el + LABEL.liftM;
+                    texts.push({
+                        id: idCounter++,
+                        text: label,
+                        color: isTerminus ? LABEL.terminusColor : LABEL.stationColor,
+                        start: {
+                            positionX: lx * MM,
+                            positionY: ly * MM,
+                            positionZ: z0 * MM
+                        },
+                        end: {
+                            positionX: lx * MM,
+                            positionY: ly * MM,
+                            positionZ: (z0 + LABEL.textHeightM) * MM
+                        }
+                    });
+                }
             }
 
             if (settings.drawSta) {
-                const pN = interpolate(points, s + 0.1) || interpolate(points, s - 0.1);
-                if (pN) {
-                    const dx = pN.x - p.x;
-                    const dy = pN.y - p.y;
-                    const l = Math.hypot(dx, dy);
-                    if (l > 0.0001) {
-                        const nx = -dy / l;
-                        const ny = dx / l;
-                        const tL = isEnd ? 1.5 : 0.8;
-                        lines.push({
-                            id: idCounter++,
-                            color,
-                            start: {
-                                positionX: (p.x - nx * tL) * MM,
-                                positionY: (p.y - ny * tL) * MM,
-                                positionZ: el * MM
-                            },
-                            end: {
-                                positionX: (p.x + nx * tL) * MM,
-                                positionY: (p.y + ny * tL) * MM,
-                                positionZ: el * MM
-                            }
-                        });
+                const tL = isTerminus ? LABEL.terminusTickHalfM : LABEL.tickHalfM;
+                lines.push({
+                    id: idCounter++,
+                    color: isTerminus ? LABEL.terminusTickColor : LABEL.tickColor,
+                    start: {
+                        positionX: (p.x - nx * tL) * MM,
+                        positionY: (p.y - ny * tL) * MM,
+                        positionZ: el * MM
+                    },
+                    end: {
+                        positionX: (p.x + nx * tL) * MM,
+                        positionY: (p.y + ny * tL) * MM,
+                        positionZ: el * MM
                     }
-                }
+                });
             }
         }
     }
