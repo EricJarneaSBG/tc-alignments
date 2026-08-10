@@ -3,7 +3,7 @@
  * Direction: region-aware file loading, recursive discovery, correct profiles,
  * optional N/E swap, Trimble-native panel; Power BI tab removed.
  */
-const VERSION = "v1.1.0";
+const VERSION = "v1.1.1";
 console.log(`Alignment Visualizer ${VERSION} loaded.`);
 
 const REGION_BASES = {
@@ -33,7 +33,9 @@ const MAX_FOLDERS = 200;
 
 let TC_API = null;
 let apiBaseUrl = null;
+let apiBaseCandidates = [];
 let projectInfo = null;
+let fileCatalog = new Map();
 let alignments = [];
 let activeMarkupIds = [];
 let idCounter = 1;
@@ -56,6 +58,8 @@ const els = {
     drawText: document.getElementById("draw-text"),
     swapNE: document.getElementById("swap-ne"),
     stationInterval: document.getElementById("station-interval"),
+    localFileInput: document.getElementById("local-file-input"),
+    localFileBtn: document.getElementById("local-file-btn"),
     version: document.getElementById("version-display")
 };
 
@@ -112,29 +116,102 @@ function baseUrlForLocation(location) {
     return null;
 }
 
-async function fetchJson(url, token, range) {
-    const headers = authHeaders(token);
-    if (range) headers.Range = range;
-    const response = await fetch(url, { headers });
-    if (!response.ok) {
-        const body = await response.text().catch(() => "");
-        throw new Error(`API ${response.status}: ${body.slice(0, 160) || response.statusText}`);
+function getConnectHostBase() {
+    const origins = [];
+    try {
+        if (document.referrer) origins.push(new URL(document.referrer).origin);
+    } catch (e) {
+        /* ignore */
     }
-    return response.json();
+    if (window.location.ancestorOrigins) {
+        for (let i = 0; i < window.location.ancestorOrigins.length; i++) {
+            origins.push(window.location.ancestorOrigins[i]);
+        }
+    }
+    for (const origin of origins) {
+        try {
+            const host = new URL(origin).hostname;
+            if (host === "connect.trimble.com" || host.endsWith(".connect.trimble.com")) {
+                return `${origin}/tc/api/2.0`;
+            }
+        } catch (e) {
+            /* ignore */
+        }
+    }
+    return null;
+}
+
+function buildApiBaseCandidates(project) {
+    const bases = [];
+    const connectHost = getConnectHostBase();
+    if (connectHost) bases.push(connectHost);
+
+    const regional = baseUrlForLocation(project?.location);
+    if (regional && !bases.includes(regional)) bases.push(regional);
+
+    for (const base of FALLBACK_BASES) {
+        if (!bases.includes(base)) bases.push(base);
+    }
+    return bases;
+}
+
+function uniqueBases(bases) {
+    return [...new Set(bases.filter(Boolean))];
+}
+
+async function tcFetch(path, token, options = {}) {
+    const bases = uniqueBases(options.bases || apiBaseCandidates.length ? apiBaseCandidates : [apiBaseUrl]);
+    let lastError = null;
+
+    for (const base of bases) {
+        const url = path.startsWith("http") ? path : `${base}${path.startsWith("/") ? path : `/${path}`}`;
+        const headers = { Accept: "application/json", ...(options.headers || {}) };
+        if (token) headers.Authorization = `Bearer ${token}`;
+        if (options.range) headers.Range = options.range;
+
+        try {
+            const response = await fetch(url, { method: options.method || "GET", headers });
+            if (!response.ok) {
+                const body = await response.text().catch(() => "");
+                throw new Error(`API ${response.status}: ${body.slice(0, 160) || response.statusText}`);
+            }
+            if (options.raw) return response;
+            const contentType = response.headers.get("content-type") || "";
+            if (contentType.includes("json")) return response.json();
+            return response.text();
+        } catch (err) {
+            lastError = err;
+            const msg = String(err.message || err);
+            if (msg.includes("Failed to fetch") || err.name === "TypeError") continue;
+            throw err;
+        }
+    }
+
+    throw lastError || new Error("Request failed on all API hosts.");
+}
+
+async function fetchJson(url, token, range) {
+    if (url.startsWith("http")) {
+        const headers = authHeaders(token);
+        if (range) headers.Range = range;
+        const response = await fetch(url, { headers });
+        if (!response.ok) {
+            const body = await response.text().catch(() => "");
+            throw new Error(`API ${response.status}: ${body.slice(0, 160) || response.statusText}`);
+        }
+        return response.json();
+    }
+    return tcFetch(url, token, { range });
 }
 
 async function resolveApiContext(project) {
-    const preferred = baseUrlForLocation(project.location);
-    const candidates = preferred
-        ? [preferred, ...FALLBACK_BASES.filter((u) => u !== preferred)]
-        : [...FALLBACK_BASES];
-
+    apiBaseCandidates = buildApiBaseCandidates(project);
     const token = await getAccessToken();
     let lastError = null;
 
-    for (const base of candidates) {
+    for (const base of apiBaseCandidates) {
         try {
-            const data = await fetchJson(`${base}/projects/${project.id}`, token);
+            const data = await tcFetch(`/projects/${project.id}`, token, { bases: [base] });
             const rootId = data.rootId || data.rootFolderId || project.id;
             return { baseUrl: base, rootId, project: data };
         } catch (err) {
@@ -142,10 +219,9 @@ async function resolveApiContext(project) {
         }
     }
 
-    // Last resort: list projects on each region and match by id
-    for (const base of candidates) {
+    for (const base of apiBaseCandidates) {
         try {
-            const projects = await fetchJson(`${base}/projects`, token, "items=0-500");
+            const projects = await tcFetch("/projects", token, { bases: [base], range: "items=0-500" });
             const list = Array.isArray(projects) ? projects : projects.items || [];
             const match = list.find((p) => p.id === project.id);
             if (match) {
@@ -170,11 +246,10 @@ async function listFolderItems(baseUrl, folderId, token) {
 
     while (true) {
         const end = start + page - 1;
-        const chunk = await fetchJson(
-            `${baseUrl}/folders/${folderId}/items`,
-            token,
-            `items=${start}-${end}`
-        );
+        const chunk = await tcFetch(`/folders/${folderId}/items`, token, {
+            bases: [baseUrl],
+            range: `items=${start}-${end}`
+        });
         const list = Array.isArray(chunk) ? chunk : chunk.items || [];
         items.push(...list);
         if (list.length < page) break;
@@ -213,7 +288,9 @@ async function findLandXmlFiles(baseUrl, rootId, token) {
                 found.push({
                     id: item.id,
                     name: item.name,
-                    path: path ? `${path}/${item.name}` : item.name
+                    path: path ? `${path}/${item.name}` : item.name,
+                    link: item.link,
+                    versionId: item.versionId
                 });
             } else if (item.type === "FOLDER" && depth < MAX_FOLDER_DEPTH) {
                 queue.push({
@@ -249,7 +326,17 @@ async function initTC() {
         const ApiObject = getApi();
         if (!ApiObject) throw new Error("Trimble Connect SDK not loaded.");
 
-        TC_API = await ApiObject.connect(window.parent, () => {}, 30000);
+        TC_API = await ApiObject.connect(
+            window.parent,
+            (event, data) => {
+                if (event === "extension.fileSelected" && data?.data?.file) {
+                    handleConnectFileSelected(data.data.file).catch((err) => {
+                        console.error("File selection event failed:", err);
+                    });
+                }
+            },
+            30000
+        );
         projectInfo = await TC_API.project.getProject();
         updateStatus(`Connected · ${projectInfo.name || "project"}`, "success");
         els.clearBtn.disabled = false;
@@ -274,15 +361,18 @@ async function loadProjectFiles() {
         const token = await getAccessToken();
         const ctx = await resolveApiContext(projectInfo);
         apiBaseUrl = ctx.baseUrl;
+        apiBaseCandidates = uniqueBases([ctx.baseUrl, ...apiBaseCandidates]);
         projectInfo = { ...projectInfo, ...ctx.project, rootId: ctx.rootId };
 
         const files = await findLandXmlFiles(apiBaseUrl, ctx.rootId, token);
+        fileCatalog = new Map();
         if (files.length === 0) {
             els.projectFiles.innerHTML = '<option value="">No LandXML files found</option>';
             updateStatus("No .xml / .landxml files found in this project.", "warn");
         } else {
             els.projectFiles.innerHTML = '<option value="">Select a LandXML file…</option>';
             for (const file of files) {
+                fileCatalog.set(file.id, file);
                 const opt = document.createElement("option");
                 opt.value = file.id;
                 opt.textContent = file.path;
@@ -300,29 +390,76 @@ async function loadProjectFiles() {
     }
 }
 
-async function resolveDownloadUrl(fileId, token) {
-    const endpoints = [
-        `${apiBaseUrl}/files/${fileId}/downloadUrl`,
-        `${apiBaseUrl}/files/${fileId}/downloadurl`
+function extractDownloadUrl(data) {
+    if (!data) return null;
+    if (typeof data === "string" && /^https?:\/\//i.test(data)) return data;
+    if (typeof data === "string") return null;
+    return data.url || data.downloadUrl || data.link || null;
+}
+
+async function fetchFileText(url) {
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(`Download failed (${response.status}).`);
+    return response.text();
+}
+
+async function resolveDownloadUrl(fileMeta, token) {
+    const fileId = fileMeta.id;
+    const versionQuery = fileMeta.versionId ? `?versionId=${encodeURIComponent(fileMeta.versionId)}` : "";
+    const paths = [
+        `/files/fs/${fileId}/downloadurl${versionQuery}`,
+        `/files/${fileId}/downloadurl${versionQuery}`,
+        `/files/${fileId}/downloadUrl${versionQuery}`
     ];
+
+    if (fileMeta.link && /^https?:\/\//i.test(fileMeta.link)) {
+        return fileMeta.link;
+    }
+
     let lastError = null;
-    for (const endpoint of endpoints) {
+    for (const path of paths) {
         try {
-            const dlData = await fetchJson(endpoint, token);
-            const url = typeof dlData === "string" ? dlData : dlData.url || dlData.downloadUrl;
+            const dlData = await tcFetch(path, token);
+            const url = extractDownloadUrl(dlData);
             if (url) return url;
             lastError = new Error("Download URL missing in response.");
         } catch (err) {
             lastError = err;
         }
     }
+
+    try {
+        const meta = await tcFetch(`/files/${fileId}`, token);
+        const url = extractDownloadUrl(meta);
+        if (url) return url;
+    } catch (err) {
+        lastError = err;
+    }
+
     throw lastError || new Error("Could not resolve download URL.");
 }
 
-async function handleFileSelection() {
-    const fileId = els.projectFiles.value;
-    if (!fileId || !apiBaseUrl) return;
+async function downloadLandXml(fileMeta) {
+    const token = await getAccessToken();
+    const url = await resolveDownloadUrl(fileMeta, token);
+    return fetchFileText(url);
+}
 
+async function handleConnectFileSelected(file) {
+    if (!file?.id) return;
+    const meta = {
+        id: file.id,
+        name: file.name,
+        path: file.name,
+        link: file.link,
+        versionId: file.versionId
+    };
+    fileCatalog.set(file.id, meta);
+    els.projectFiles.value = file.id;
+    await loadLandXmlFromProject(meta);
+}
+
+async function loadLandXmlFromProject(fileMeta) {
     setBusy(true);
     updateStatus("Downloading LandXML…", "info");
     alignments = [];
@@ -330,18 +467,57 @@ async function handleFileSelection() {
     els.alignmentSection.classList.add("hidden");
 
     try {
-        const token = await getAccessToken();
-        const url = await resolveDownloadUrl(fileId, token);
-        const contentResponse = await fetch(url);
-        if (!contentResponse.ok) throw new Error(`Download failed (${contentResponse.status}).`);
-        parseLandXML(await contentResponse.text());
+        const xmlText = await downloadLandXml(fileMeta);
+        parseLandXML(xmlText);
     } catch (e) {
         console.error("Download error:", e);
-        updateStatus(`Download failed: ${e.message}`, "error");
+        const corsHint =
+            String(e.message || "").includes("Failed to fetch")
+                ? " Browser blocked the Trimble API request (CORS). Try “Open local XML…” or re-open the extension from Connect."
+                : "";
+        updateStatus(`Download failed: ${e.message}${corsHint}`, "error");
     } finally {
         setBusy(false);
         syncActionButtons();
     }
+}
+
+async function handleFileSelection() {
+    const fileId = els.projectFiles.value;
+    if (!fileId || !apiBaseUrl) return;
+    const fileMeta = fileCatalog.get(fileId) || { id: fileId };
+    await loadLandXmlFromProject(fileMeta);
+}
+
+function handleLocalFileSelection(event) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    setBusy(true);
+    updateStatus(`Reading ${file.name}…`, "info");
+    alignments = [];
+    els.listItems.innerHTML = "";
+    els.alignmentSection.classList.add("hidden");
+    els.projectFiles.value = "";
+
+    const reader = new FileReader();
+    reader.onload = () => {
+        try {
+            parseLandXML(String(reader.result || ""));
+        } catch (e) {
+            updateStatus(`Could not read file: ${e.message}`, "error");
+        } finally {
+            setBusy(false);
+            syncActionButtons();
+            event.target.value = "";
+        }
+    };
+    reader.onerror = () => {
+        updateStatus("Could not read the selected file.", "error");
+        setBusy(false);
+        syncActionButtons();
+        event.target.value = "";
+    };
+    reader.readAsText(file);
 }
 
 function localName(node) {
@@ -875,6 +1051,10 @@ function processAlignment(align, settings) {
 // Events
 els.reloadBtn.addEventListener("click", loadProjectFiles);
 els.projectFiles.addEventListener("change", handleFileSelection);
+if (els.localFileBtn && els.localFileInput) {
+    els.localFileBtn.addEventListener("click", () => els.localFileInput.click());
+    els.localFileInput.addEventListener("change", handleLocalFileSelection);
+}
 els.drawBtn.addEventListener("click", drawSelectedAlignments);
 els.clearBtn.addEventListener("click", clearMarkups);
 els.selectAllBtn.addEventListener("click", () => setAllChecks(true));

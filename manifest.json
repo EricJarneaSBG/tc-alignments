@@ -3,6 +3,6 @@
   "icon": "https://img.icons8.com/color/48/000000/road.png",
   "url": "https://ericjarneasbg.github.io/tc-alignments/index.html",
   "description": "Reads LandXML from the project and draws alignments with stationing in the 3D viewer.",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "requiredScopes": ["project:read", "file:read", "folder:read"]
 }
