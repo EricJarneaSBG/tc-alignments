@@ -1,359 +1,884 @@
 /**
  * LandXML Alignment Visualizer for Trimble Connect
+ * Direction: region-aware file loading, recursive discovery, correct profiles,
+ * optional N/E swap, Trimble-native panel; Power BI tab removed.
  */
-const VERSION = "v1.0.5";
+const VERSION = "v1.1.0";
 console.log(`Alignment Visualizer ${VERSION} loaded.`);
 
+const REGION_BASES = {
+    northamerica: "https://app.connect.trimble.com/tc/api/2.0",
+    northAmerica: "https://app.connect.trimble.com/tc/api/2.0",
+    us: "https://app.connect.trimble.com/tc/api/2.0",
+    europe: "https://app21.connect.trimble.com/tc/api/2.0",
+    eu: "https://app21.connect.trimble.com/tc/api/2.0",
+    asia: "https://app31.connect.trimble.com/tc/api/2.0",
+    ap: "https://app31.connect.trimble.com/tc/api/2.0",
+    australia: "https://app32.connect.trimble.com/tc/api/2.0",
+    apau: "https://app32.connect.trimble.com/tc/api/2.0",
+    "ap-au": "https://app32.connect.trimble.com/tc/api/2.0"
+};
+
+const FALLBACK_BASES = [
+    "https://app21.connect.trimble.com/tc/api/2.0",
+    "https://app.connect.trimble.com/tc/api/2.0",
+    "https://app31.connect.trimble.com/tc/api/2.0",
+    "https://app32.connect.trimble.com/tc/api/2.0"
+];
+
+const MM = 1000;
+const BATCH = 40;
+const MAX_FOLDER_DEPTH = 8;
+const MAX_FOLDERS = 200;
+
 let TC_API = null;
+let apiBaseUrl = null;
+let projectInfo = null;
 let alignments = [];
-let activeMarkupIds = []; 
-let idCounter = 1; 
+let activeMarkupIds = [];
+let idCounter = 1;
+let busy = false;
 
-// UI Elements
-const statusText = document.getElementById('status');
-const alignmentList = document.getElementById('alignment-list');
-const listItems = document.getElementById('list-items');
-const drawBtn = document.getElementById('draw-btn');
-const clearBtn = document.getElementById('clear-btn');
-const projectFilesDropdown = document.getElementById('project-files');
-const reloadFilesBtn = document.getElementById('reload-files-btn');
+const els = {
+    status: document.getElementById("status"),
+    statusBar: document.getElementById("status-bar"),
+    alignmentSection: document.getElementById("alignment-section"),
+    alignmentCount: document.getElementById("alignment-count"),
+    listItems: document.getElementById("list-items"),
+    drawBtn: document.getElementById("draw-btn"),
+    clearBtn: document.getElementById("clear-btn"),
+    projectFiles: document.getElementById("project-files"),
+    reloadBtn: document.getElementById("reload-files-btn"),
+    selectAllBtn: document.getElementById("select-all-btn"),
+    selectNoneBtn: document.getElementById("select-none-btn"),
+    drawAlignments: document.getElementById("draw-alignments"),
+    drawStationing: document.getElementById("draw-stationing"),
+    drawText: document.getElementById("draw-text"),
+    swapNE: document.getElementById("swap-ne"),
+    stationInterval: document.getElementById("station-interval"),
+    version: document.getElementById("version-display")
+};
 
-const drawAlignmentsCheck = document.getElementById('draw-alignments');
-const drawStationingCheck = document.getElementById('draw-stationing');
-const drawTextCheck = document.getElementById('draw-text');
-const stationIntervalInput = document.getElementById('station-interval');
+if (els.version) els.version.textContent = VERSION;
 
-// Tab Switching
-const tabBtns = document.querySelectorAll('.tab-btn');
-const tabContents = document.querySelectorAll('.tab-content');
+function updateStatus(text, tone = "info") {
+    els.status.textContent = text;
+    els.statusBar.dataset.tone = tone;
+}
 
-tabBtns.forEach(btn => {
-    btn.addEventListener('click', () => {
-        const targetTab = btn.dataset.tab;
-        tabBtns.forEach(b => b.classList.remove('active'));
-        btn.classList.add('active');
-        tabContents.forEach(content => {
-            if (content.id === `${targetTab}-tab`) content.classList.remove('hidden');
-            else content.classList.add('hidden');
-        });
-    });
-});
+function setBusy(isBusy) {
+    busy = isBusy;
+    els.reloadBtn.classList.toggle("is-busy", isBusy);
+    els.reloadBtn.disabled = isBusy || !TC_API;
+    els.projectFiles.disabled = isBusy || !TC_API;
+    syncActionButtons();
+}
 
-// Initialize Trimble Connect API
+function syncActionButtons() {
+    const hasSelection = els.listItems.querySelectorAll("input:checked").length > 0;
+    els.drawBtn.disabled = busy || !TC_API || !hasSelection;
+    els.clearBtn.disabled = busy || !TC_API;
+}
+
+function authHeaders(token) {
+    return {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/json"
+    };
+}
+
+async function getAccessToken() {
+    const token = await TC_API.extension.requestPermission("accesstoken");
+    if (!token || token === "denied" || token === "error") {
+        throw new Error("Access token was denied. Check extension permissions.");
+    }
+    return token;
+}
+
+function normalizeLocation(location) {
+    if (!location) return "";
+    return String(location).trim().toLowerCase().replace(/[\s_]/g, "");
+}
+
+function baseUrlForLocation(location) {
+    const key = normalizeLocation(location);
+    if (!key) return null;
+    if (REGION_BASES[key]) return REGION_BASES[key];
+    if (REGION_BASES[location]) return REGION_BASES[location];
+    // Loose match: "europe", "northamerica", etc.
+    for (const [k, url] of Object.entries(REGION_BASES)) {
+        if (normalizeLocation(k) === key) return url;
+    }
+    return null;
+}
+
+async function fetchJson(url, token, range) {
+    const headers = authHeaders(token);
+    if (range) headers.Range = range;
+    const response = await fetch(url, { headers });
+    if (!response.ok) {
+        const body = await response.text().catch(() => "");
+        throw new Error(`API ${response.status}: ${body.slice(0, 160) || response.statusText}`);
+    }
+    return response.json();
+}
+
+async function resolveApiContext(project) {
+    const preferred = baseUrlForLocation(project.location);
+    const candidates = preferred
+        ? [preferred, ...FALLBACK_BASES.filter((u) => u !== preferred)]
+        : [...FALLBACK_BASES];
+
+    const token = await getAccessToken();
+    let lastError = null;
+
+    for (const base of candidates) {
+        try {
+            const data = await fetchJson(`${base}/projects/${project.id}`, token);
+            const rootId = data.rootId || data.rootFolderId || project.id;
+            return { baseUrl: base, rootId, project: data };
+        } catch (err) {
+            lastError = err;
+        }
+    }
+
+    // Last resort: list projects on each region and match by id
+    for (const base of candidates) {
+        try {
+            const projects = await fetchJson(`${base}/projects`, token, "items=0-500");
+            const list = Array.isArray(projects) ? projects : projects.items || [];
+            const match = list.find((p) => p.id === project.id);
+            if (match) {
+                return {
+                    baseUrl: base,
+                    rootId: match.rootId || match.rootFolderId || project.id,
+                    project: match
+                };
+            }
+        } catch (err) {
+            lastError = err;
+        }
+    }
+
+    throw lastError || new Error("Could not resolve project region / root folder.");
+}
+
+async function listFolderItems(baseUrl, folderId, token) {
+    const items = [];
+    let start = 0;
+    const page = 500;
+
+    while (true) {
+        const end = start + page - 1;
+        const chunk = await fetchJson(
+            `${baseUrl}/folders/${folderId}/items`,
+            token,
+            `items=${start}-${end}`
+        );
+        const list = Array.isArray(chunk) ? chunk : chunk.items || [];
+        items.push(...list);
+        if (list.length < page) break;
+        start += page;
+        if (start > 5000) break;
+    }
+
+    return items;
+}
+
+function isLandXmlFile(item) {
+    if (!item || item.type !== "FILE" || !item.name) return false;
+    const name = item.name.toLowerCase();
+    return name.endsWith(".xml") || name.endsWith(".landxml");
+}
+
+async function findLandXmlFiles(baseUrl, rootId, token) {
+    const found = [];
+    const queue = [{ id: rootId, path: "" }];
+    let foldersVisited = 0;
+
+    while (queue.length && foldersVisited < MAX_FOLDERS) {
+        const { id, path, depth = 0 } = queue.shift();
+        foldersVisited += 1;
+
+        let items;
+        try {
+            items = await listFolderItems(baseUrl, id, token);
+        } catch (err) {
+            console.warn(`Skipping folder ${id}:`, err);
+            continue;
+        }
+
+        for (const item of items) {
+            if (isLandXmlFile(item)) {
+                found.push({
+                    id: item.id,
+                    name: item.name,
+                    path: path ? `${path}/${item.name}` : item.name
+                });
+            } else if (item.type === "FOLDER" && depth < MAX_FOLDER_DEPTH) {
+                queue.push({
+                    id: item.id,
+                    path: path ? `${path}/${item.name}` : item.name,
+                    depth: depth + 1
+                });
+            }
+        }
+    }
+
+    found.sort((a, b) => a.path.localeCompare(b.path, undefined, { sensitivity: "base" }));
+    return found;
+}
+
 async function initTC() {
     try {
-        const getApi = () => (typeof TrimbleConnectWorkspace !== 'undefined' ? TrimbleConnectWorkspace : 
-                             (typeof TrimbleConnectWorkspaceApi !== 'undefined' ? TrimbleConnectWorkspaceApi : undefined));
+        const getApi = () =>
+            typeof TrimbleConnectWorkspace !== "undefined"
+                ? TrimbleConnectWorkspace
+                : typeof TrimbleConnectWorkspaceApi !== "undefined"
+                  ? TrimbleConnectWorkspaceApi
+                  : undefined;
 
         if (!getApi()) {
             let attempts = 0;
             while (!getApi() && attempts < 50) {
-                await new Promise(r => setTimeout(r, 100));
-                attempts++;
+                await new Promise((r) => setTimeout(r, 100));
+                attempts += 1;
             }
         }
 
         const ApiObject = getApi();
         if (!ApiObject) throw new Error("Trimble Connect SDK not loaded.");
 
-        TC_API = await ApiObject.connect(window.parent, (event, data) => {}, 30000);
-        updateStatus("Connected to Trimble Connect.");
-        
-        // Initial load
+        TC_API = await ApiObject.connect(window.parent, () => {}, 30000);
+        projectInfo = await TC_API.project.getProject();
+        updateStatus(`Connected · ${projectInfo.name || "project"}`, "success");
+        els.clearBtn.disabled = false;
         await loadProjectFiles();
     } catch (e) {
         console.error("Failed to connect to TC:", e);
-        updateStatus("Error: " + e.message);
+        updateStatus(`Connection failed: ${e.message}`, "error");
+        els.projectFiles.innerHTML = '<option value="">-- Not connected --</option>';
+        els.projectFiles.disabled = true;
+        els.reloadBtn.disabled = true;
     }
 }
 
-// Event Listeners
-reloadFilesBtn.addEventListener('click', loadProjectFiles);
-projectFilesDropdown.addEventListener('change', handleFileSelection);
-drawBtn.addEventListener('click', async () => {
-    updateStatus("Preparing viewer...");
-    await clearMarkups();
-    await new Promise(r => setTimeout(r, 200)); 
-    await drawSelectedAlignments();
-});
-clearBtn.addEventListener('click', clearMarkups);
-
-function updateStatus(text) { statusText.innerText = text; }
-
-/**
- * Enhanced Project File Loader for Europe (app21)
- * Addresses the 403 Forbidden error by discovering the correct Root Folder ID.
- */
 async function loadProjectFiles() {
-    if (!TC_API) return;
-    updateStatus("Accessing project files...");
-    projectFilesDropdown.innerHTML = '<option value="">-- Loading... --</option>';
+    if (!TC_API || busy) return;
+    setBusy(true);
+    updateStatus("Scanning project for LandXML files…", "info");
+    els.projectFiles.innerHTML = '<option value="">Loading…</option>';
 
     try {
-        const projectInfo = await TC_API.project.getProject();
-        const token = await TC_API.extension.requestPermission("accesstoken");
-        
-        const baseUrl = "https://app21.connect.trimble.com/tc/api/2.0";
-        console.log(`Region focus: app21. Project ID: ${projectInfo.id}`);
+        if (!projectInfo) projectInfo = await TC_API.project.getProject();
+        const token = await getAccessToken();
+        const ctx = await resolveApiContext(projectInfo);
+        apiBaseUrl = ctx.baseUrl;
+        projectInfo = { ...projectInfo, ...ctx.project, rootId: ctx.rootId };
 
-        // 1. Fetch the full project list to get its root folder (often named 'rootId')
-        const projectsResp = await fetch(`${baseUrl}/projects`, {
-            headers: { 
-                'Authorization': `Bearer ${token}`,
-                'Range': 'items=0-200'
+        const files = await findLandXmlFiles(apiBaseUrl, ctx.rootId, token);
+        if (files.length === 0) {
+            els.projectFiles.innerHTML = '<option value="">No LandXML files found</option>';
+            updateStatus("No .xml / .landxml files found in this project.", "warn");
+        } else {
+            els.projectFiles.innerHTML = '<option value="">Select a LandXML file…</option>';
+            for (const file of files) {
+                const opt = document.createElement("option");
+                opt.value = file.id;
+                opt.textContent = file.path;
+                opt.title = file.path;
+                els.projectFiles.appendChild(opt);
             }
-        });
-
-        let targetProject = null;
-        if (projectsResp.ok) {
-            const projects = await projectsResp.json();
-            targetProject = projects.find(p => p.id === projectInfo.id);
-            console.log("Found project in list:", targetProject);
+            updateStatus(`Found ${files.length} LandXML file${files.length === 1 ? "" : "s"}.`, "success");
         }
-
-        // 2. Determine the folder ID to list (Try rootId, then rootFolderId, fallback to project ID)
-        const folderId = targetProject ? (targetProject.rootId || targetProject.rootFolderId || projectInfo.id) : projectInfo.id;
-        console.log(`Listing items for folder: ${folderId}`);
-
-        // 3. List items
-        const response = await fetch(`${baseUrl}/folders/${folderId}/items`, {
-            headers: { 
-                'Authorization': `Bearer ${token}`,
-                'Range': 'items=0-500'
-            }
-        });
-
-        if (!response.ok) {
-            const errText = await response.text();
-            throw new Error(`API ${response.status}: ${errText}`);
-        }
-
-        const items = await response.json();
-        const landXmlFiles = items.filter(i => i.type === 'FILE' && (i.name.toLowerCase().endsWith('.xml') || i.name.toLowerCase().endsWith('.landxml')));
-        
-        projectFilesDropdown.innerHTML = landXmlFiles.length > 0 ? '<option value="">-- Select LandXML --</option>' : '<option value="">-- No XMLs Found --</option>';
-        
-        landXmlFiles.forEach(file => {
-            const opt = document.createElement('option');
-            opt.value = file.id;
-            opt.textContent = file.name;
-            opt.dataset.baseUrl = baseUrl;
-            projectFilesDropdown.appendChild(opt);
-        });
-
-        updateStatus(`Found ${landXmlFiles.length} LandXML files.`);
     } catch (e) {
         console.error("Load files error:", e);
-        updateStatus("Error: " + e.message);
-        projectFilesDropdown.innerHTML = '<option value="">-- Error --</option>';
+        updateStatus(`Could not list files: ${e.message}`, "error");
+        els.projectFiles.innerHTML = '<option value="">-- Error loading files --</option>';
+    } finally {
+        setBusy(false);
     }
+}
+
+async function resolveDownloadUrl(fileId, token) {
+    const endpoints = [
+        `${apiBaseUrl}/files/${fileId}/downloadUrl`,
+        `${apiBaseUrl}/files/${fileId}/downloadurl`
+    ];
+    let lastError = null;
+    for (const endpoint of endpoints) {
+        try {
+            const dlData = await fetchJson(endpoint, token);
+            const url = typeof dlData === "string" ? dlData : dlData.url || dlData.downloadUrl;
+            if (url) return url;
+            lastError = new Error("Download URL missing in response.");
+        } catch (err) {
+            lastError = err;
+        }
+    }
+    throw lastError || new Error("Could not resolve download URL.");
 }
 
 async function handleFileSelection() {
-    const fileId = projectFilesDropdown.value;
-    if (!fileId) return;
-    const selectedOption = projectFilesDropdown.selectedOptions[0];
-    const baseUrl = selectedOption.dataset.baseUrl;
+    const fileId = els.projectFiles.value;
+    if (!fileId || !apiBaseUrl) return;
 
-    updateStatus(`Downloading alignment data...`);
+    setBusy(true);
+    updateStatus("Downloading LandXML…", "info");
+    alignments = [];
+    els.listItems.innerHTML = "";
+    els.alignmentSection.classList.add("hidden");
+
     try {
-        const token = await TC_API.extension.requestPermission("accesstoken");
-        const dlResponse = await fetch(`${baseUrl}/files/${fileId}/downloadUrl`, {
-            headers: { 'Authorization': `Bearer ${token}` }
-        });
-        if (!dlResponse.ok) throw new Error("Download URL denied");
-        const dlData = await dlResponse.json();
-        const contentResponse = await fetch(dlData.url);
-        const xmlText = await contentResponse.text();
-        parseLandXML(xmlText);
+        const token = await getAccessToken();
+        const url = await resolveDownloadUrl(fileId, token);
+        const contentResponse = await fetch(url);
+        if (!contentResponse.ok) throw new Error(`Download failed (${contentResponse.status}).`);
+        parseLandXML(await contentResponse.text());
     } catch (e) {
-        updateStatus("Error downloading file.");
+        console.error("Download error:", e);
+        updateStatus(`Download failed: ${e.message}`, "error");
+    } finally {
+        setBusy(false);
+        syncActionButtons();
     }
+}
+
+function localName(node) {
+    return (node.localName || node.tagName || "").replace(/^.*:/, "");
+}
+
+function childrenByName(parent, name) {
+    return Array.from(parent.children || []).filter((c) => localName(c) === name);
+}
+
+function firstByName(parent, name) {
+    return childrenByName(parent, name)[0] || null;
+}
+
+function findProfileForAlignment(alignNode, alignName, xmlDoc) {
+    const nested = childrenByName(alignNode, "Profile");
+    if (nested.length) return nested[0];
+
+    const all = xmlDoc.getElementsByTagNameNS("*", "Profile");
+    for (let i = 0; i < all.length; i++) {
+        if (all[i].getAttribute("name") === alignName) return all[i];
+    }
+    return null;
 }
 
 function parseLandXML(xmlText) {
     const parser = new DOMParser();
     const xmlDoc = parser.parseFromString(xmlText, "text/xml");
-    const alignmentNodes = xmlDoc.getElementsByTagName('Alignment');
+    const parseError = xmlDoc.querySelector("parsererror");
+    if (parseError) {
+        updateStatus("Invalid XML file.", "error");
+        return;
+    }
+
+    const alignmentNodes = xmlDoc.getElementsByTagNameNS("*", "Alignment");
     alignments = [];
-    listItems.innerHTML = '';
+    els.listItems.innerHTML = "";
 
     if (alignmentNodes.length === 0) {
-        updateStatus("No alignments in file.");
+        updateStatus("No <Alignment> elements found in this file.", "warn");
+        els.alignmentSection.classList.add("hidden");
+        syncActionButtons();
         return;
     }
 
     for (let i = 0; i < alignmentNodes.length; i++) {
         const node = alignmentNodes[i];
-        const name = node.getAttribute('name') || `Alignment ${i+1}`;
-        const alignment = { id: i, name: name, node: node, profile: null };
-        const profileNodes = xmlDoc.getElementsByTagName('Profile');
-        for (let j = 0; j < profileNodes.length; j++) {
-            if (profileNodes[j].getAttribute('name') === name) {
-                alignment.profile = profileNodes[j];
-                break;
-            }
-        }
-        alignments.push(alignment);
-        const div = document.createElement('div');
-        div.className = 'alignment-item';
-        div.innerHTML = `<input type="checkbox" id="align-${i}" value="${i}" checked><label for="align-${i}">${name}</label>`;
-        listItems.appendChild(div);
+        const name = node.getAttribute("name") || `Alignment ${i + 1}`;
+        const profile = findProfileForAlignment(node, name, xmlDoc);
+        const lengthAttr = node.getAttribute("length");
+        const staStart = node.getAttribute("staStart");
+
+        alignments.push({ id: i, name, node, profile });
+
+        const div = document.createElement("div");
+        div.className = "alignment-item";
+        const metaParts = [];
+        if (staStart != null) metaParts.push(`Start ${formatStation(parseFloat(staStart) || 0)}`);
+        if (lengthAttr != null) metaParts.push(`${Number(lengthAttr).toFixed(1)} m`);
+        if (profile) metaParts.push("profile");
+
+        div.innerHTML = `
+            <input type="checkbox" id="align-${i}" value="${i}" checked>
+            <label for="align-${i}">
+                ${escapeHtml(name)}
+                ${metaParts.length ? `<span class="alignment-meta">${escapeHtml(metaParts.join(" · "))}</span>` : ""}
+            </label>
+        `;
+        els.listItems.appendChild(div);
     }
-    alignmentList.classList.remove('hidden');
-    updateStatus(`Alignments loaded.`);
+
+    els.alignmentCount.textContent = `(${alignments.length})`;
+    els.alignmentSection.classList.remove("hidden");
+    updateStatus(`Loaded ${alignments.length} alignment${alignments.length === 1 ? "" : "s"}.`, "success");
+    syncActionButtons();
+}
+
+function escapeHtml(str) {
+    return String(str)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+}
+
+function setAllChecks(checked) {
+    els.listItems.querySelectorAll("input[type=checkbox]").forEach((cb) => {
+        cb.checked = checked;
+    });
+    syncActionButtons();
 }
 
 async function clearMarkups() {
-    if (!TC_API || !TC_API.markup || activeMarkupIds.length === 0) return;
+    if (!TC_API || !TC_API.markup) return;
+    setBusy(true);
     try {
-        const removeFn = TC_API.markup.removeMarkups || TC_API.markup.removeLineMarkups;
-        if (removeFn) {
-            for (let i = 0; i < activeMarkupIds.length; i += 100) {
-                await removeFn.call(TC_API.markup, activeMarkupIds.slice(i, i + 100));
-            }
-        }
+        await clearMarkupsInternal();
+        updateStatus("Viewer markups cleared.", "success");
+    } catch (e) {
+        console.error("Clear failed:", e);
         activeMarkupIds = [];
-        updateStatus("Cleared.");
-    } catch (e) { activeMarkupIds = []; }
+        updateStatus(`Clear failed: ${e.message}`, "error");
+    } finally {
+        setBusy(false);
+    }
 }
 
 async function drawSelectedAlignments() {
-    const selectedIds = Array.from(listItems.querySelectorAll('input:checked')).map(cb => parseInt(cb.value));
-    if (selectedIds.length === 0) return;
-
-    const settings = {
-        drawAlign: drawAlignmentsCheck.checked,
-        drawSta: drawStationingCheck.checked,
-        drawText: drawTextCheck.checked,
-        interval: parseFloat(stationIntervalInput.value) || 100,
-        swap: true 
-    };
-
-    updateStatus("Processing...");
-    const lines = [], texts = [];
-    for (const id of selectedIds) {
-        const geom = processAlignment(alignments[id], settings);
-        lines.push(...geom.lines);
-        texts.push(...geom.texts);
+    const selectedIds = Array.from(els.listItems.querySelectorAll("input:checked")).map((cb) =>
+        parseInt(cb.value, 10)
+    );
+    if (selectedIds.length === 0) {
+        updateStatus("Select at least one alignment.", "warn");
+        return;
     }
 
+    const settings = {
+        drawAlign: els.drawAlignments.checked,
+        drawSta: els.drawStationing.checked,
+        drawText: els.drawText.checked,
+        interval: Math.max(1, parseFloat(els.stationInterval.value) || 100),
+        swap: els.swapNE.checked
+    };
+
+    if (!settings.drawAlign && !settings.drawSta && !settings.drawText) {
+        updateStatus("Enable at least one display option.", "warn");
+        return;
+    }
+
+    setBusy(true);
+    updateStatus("Clearing previous markups…", "info");
     try {
-        const add = async (items, sing, plur) => {
-            for (let i = 0; i < items.length; i += 40) {
-                const batch = items.slice(i, i + 40);
-                let res;
-                if (plur) res = await plur.call(TC_API.markup, batch);
-                else if (sing) { for (const itm of batch) res = await sing.call(TC_API.markup, itm); }
-                if (Array.isArray(res)) res.forEach(r => activeMarkupIds.push(r.id || r));
-                else if (res) activeMarkupIds.push(res.id || res);
+        try {
+            await clearMarkupsInternal();
+        } catch (e) {
+            console.warn("Pre-draw clear warning:", e);
+            activeMarkupIds = [];
+        }
+        await new Promise((r) => setTimeout(r, 150));
+
+        updateStatus("Building geometry…", "info");
+        const lines = [];
+        const texts = [];
+        for (const id of selectedIds) {
+            const geom = processAlignment(alignments[id], settings);
+            lines.push(...geom.lines);
+            texts.push(...geom.texts);
+        }
+
+        if (lines.length === 0 && texts.length === 0) {
+            updateStatus("No drawable geometry found for the selection.", "warn");
+            return;
+        }
+
+        updateStatus(`Drawing ${lines.length} lines, ${texts.length} labels…`, "info");
+        await addMarkups(lines, texts);
+        updateStatus(
+            `Drawn ${selectedIds.length} alignment${selectedIds.length === 1 ? "" : "s"} (${lines.length} segments).`,
+            "success"
+        );
+    } catch (e) {
+        console.error("Draw failed:", e);
+        updateStatus(`Draw failed: ${e.message}`, "error");
+    } finally {
+        setBusy(false);
+    }
+}
+
+async function clearMarkupsInternal() {
+    if (!TC_API?.markup) return;
+    const removeFn = TC_API.markup.removeMarkups || TC_API.markup.removeLineMarkups;
+    if (!removeFn) throw new Error("Clear is not supported by this viewer API.");
+
+    if (activeMarkupIds.length > 0) {
+        for (let i = 0; i < activeMarkupIds.length; i += 100) {
+            await removeFn.call(TC_API.markup, activeMarkupIds.slice(i, i + 100));
+        }
+    } else if (TC_API.markup.removeMarkups) {
+        // Ids were lost — clear all viewer markups as a fallback
+        await TC_API.markup.removeMarkups(undefined);
+    }
+    activeMarkupIds = [];
+}
+
+async function addMarkups(lines, texts) {
+    const addBatch = async (items, singular, plural) => {
+        for (let i = 0; i < items.length; i += BATCH) {
+            const batch = items.slice(i, i + BATCH);
+            let res;
+            if (typeof plural === "function") {
+                res = await plural.call(TC_API.markup, batch);
+            } else if (typeof singular === "function") {
+                res = [];
+                for (const item of batch) {
+                    const one = await singular.call(TC_API.markup, item);
+                    if (Array.isArray(one)) res.push(...one);
+                    else if (one) res.push(one);
+                }
             }
-        };
-        await add(lines, TC_API.markup.addLineMarkup, TC_API.markup.addLineMarkups);
-        await add(texts, TC_API.markup.addTextMarkup, TC_API.markup.addTextMarkups);
-        updateStatus("Drawing complete.");
-    } catch (e) { updateStatus("Draw failed."); }
+            if (Array.isArray(res)) {
+                res.forEach((r) => activeMarkupIds.push(r.id ?? r.markupId ?? r));
+            } else if (res) {
+                activeMarkupIds.push(res.id ?? res.markupId ?? res);
+            }
+        }
+    };
+
+    await addBatch(lines, TC_API.markup.addLineMarkup, TC_API.markup.addLineMarkups);
+    // Workspace API documents addTextMarkup taking an array
+    await addBatch(texts, null, TC_API.markup.addTextMarkup || TC_API.markup.addTextMarkups);
 }
 
 function formatStation(s) {
-    const km = Math.floor(s / 1000);
-    const m = (s % 1000).toFixed(3).split('.');
-    return `${km}+${m[0].padStart(3, '0')}${m[1] !== '000' ? '.' + m[1] : ''}`;
+    if (!isFinite(s)) return "0+000";
+    const sign = s < 0 ? "-" : "";
+    const abs = Math.abs(s);
+    const km = Math.floor(abs / 1000);
+    const meters = abs - km * 1000;
+    const whole = Math.floor(meters);
+    const frac = Math.round((meters - whole) * 1000);
+    const base = `${km}+${String(whole).padStart(3, "0")}`;
+    return sign + (frac ? `${base}.${String(frac).padStart(3, "0")}` : base);
+}
+
+function parseCoord(str, swap) {
+    if (!str) return null;
+    const pts = str.trim().split(/\s+/);
+    if (pts.length < 2) return null;
+    const a = parseFloat(pts[0]);
+    const b = parseFloat(pts[1]);
+    if (!isFinite(a) || !isFinite(b)) return null;
+    return swap ? { x: b, y: a } : { x: a, y: b };
+}
+
+function dist(p1, p2) {
+    return Math.hypot(p1.x - p2.x, p1.y - p2.y);
+}
+
+function interpolate(pts, s) {
+    if (!pts.length) return null;
+    if (s <= pts[0].sta + 0.001) return pts[0];
+    if (s >= pts[pts.length - 1].sta - 0.001) return pts[pts.length - 1];
+    for (let i = 0; i < pts.length - 1; i++) {
+        if (s >= pts[i].sta && s <= pts[i + 1].sta) {
+            const span = pts[i + 1].sta - pts[i].sta || 1;
+            const t = (s - pts[i].sta) / span;
+            return {
+                x: pts[i].x + t * (pts[i + 1].x - pts[i].x),
+                y: pts[i].y + t * (pts[i + 1].y - pts[i].y)
+            };
+        }
+    }
+    return null;
+}
+
+function sampleArc(center, start, end, radius, rot, sta, len, points) {
+    const segs = Math.max(2, Math.ceil(Math.abs(len) / 10));
+    let sA = Math.atan2(start.y - center.y, start.x - center.x);
+    let eA = Math.atan2(end.y - center.y, end.x - center.x);
+    if (rot === "cw" && eA > sA) eA -= 2 * Math.PI;
+    if (rot === "ccw" && eA < sA) eA += 2 * Math.PI;
+    // If rotation unknown, pick the shorter arc
+    if (rot !== "cw" && rot !== "ccw") {
+        let d = eA - sA;
+        while (d > Math.PI) d -= 2 * Math.PI;
+        while (d < -Math.PI) d += 2 * Math.PI;
+        eA = sA + d;
+    }
+    const rad = isFinite(radius) && radius > 0 ? radius : dist(center, start);
+    for (let i = 0; i <= segs; i++) {
+        const t = i / segs;
+        const a = sA + t * (eA - sA);
+        points.push({
+            x: center.x + rad * Math.cos(a),
+            y: center.y + rad * Math.sin(a),
+            sta: sta + t * len
+        });
+    }
+}
+
+function sampleSpiral(start, end, center, radiusStart, radiusEnd, rot, sta, len, points) {
+    // Clothoid-lite: interpolate curvature and walk the tangent
+    const segs = Math.max(4, Math.ceil(Math.abs(len) / 5));
+    const k0 = radiusStart > 0 ? 1 / radiusStart : 0;
+    const k1 = radiusEnd > 0 ? 1 / radiusEnd : 0;
+    const dir = rot === "cw" ? -1 : 1;
+
+    // Initial heading from start toward PI/end if available
+    let heading = Math.atan2(end.y - start.y, end.x - start.x);
+    if (center) {
+        const radial = Math.atan2(start.y - center.y, start.x - center.x);
+        heading = radial + (dir > 0 ? Math.PI / 2 : -Math.PI / 2);
+    }
+
+    let x = start.x;
+    let y = start.y;
+    points.push({ x, y, sta });
+    const ds = len / segs;
+    for (let i = 1; i <= segs; i++) {
+        const t0 = (i - 1) / segs;
+        const k = k0 + (k1 - k0) * t0;
+        heading += dir * k * ds;
+        x += Math.cos(heading) * ds;
+        y += Math.sin(heading) * ds;
+        points.push({ x, y, sta: sta + i * ds });
+    }
+
+    // Soft snap end toward published End coordinate
+    const last = points[points.length - 1];
+    if (end && dist(last, end) > 0.05) {
+        points[points.length - 1] = { x: end.x, y: end.y, sta: sta + len };
+    }
+}
+
+function collectGeomPoints(align, swap) {
+    const points = [];
+    const cg =
+        firstByName(align.node, "CoordGeom") ||
+        align.node.getElementsByTagNameNS("*", "CoordGeom")[0];
+    if (!cg) return points;
+
+    for (const child of Array.from(cg.children)) {
+        const tag = localName(child);
+        const sta = parseFloat(child.getAttribute("staStart")) || (points.length ? points[points.length - 1].sta : 0);
+        const len = parseFloat(child.getAttribute("length")) || 0;
+        const rot = (child.getAttribute("rot") || "").toLowerCase();
+
+        if (tag === "Line") {
+            const s = parseCoord(firstByName(child, "Start")?.textContent, swap);
+            const e = parseCoord(firstByName(child, "End")?.textContent, swap);
+            if (s && e) {
+                points.push({ ...s, sta });
+                points.push({ ...e, sta: sta + (len || dist(s, e)) });
+            }
+        } else if (tag === "Curve") {
+            const s = parseCoord(firstByName(child, "Start")?.textContent, swap);
+            const c = parseCoord(firstByName(child, "Center")?.textContent, swap);
+            const e = parseCoord(firstByName(child, "End")?.textContent, swap);
+            const rad = parseFloat(child.getAttribute("radius"));
+            if (s && c && e) sampleArc(c, s, e, rad, rot, sta, len || 0, points);
+            else if (s && e) {
+                points.push({ ...s, sta });
+                points.push({ ...e, sta: sta + (len || dist(s, e)) });
+            }
+        } else if (tag === "Spiral") {
+            const s = parseCoord(firstByName(child, "Start")?.textContent, swap);
+            const e = parseCoord(firstByName(child, "End")?.textContent, swap);
+            const c = parseCoord(firstByName(child, "Center")?.textContent, swap);
+            const r0 = parseFloat(child.getAttribute("radiusStart"));
+            const r1 = parseFloat(child.getAttribute("radiusEnd"));
+            if (s && e) sampleSpiral(s, e, c, r0, r1, rot, sta, len || dist(s, e), points);
+        } else if (tag === "IrregularLine") {
+            const start = parseCoord(firstByName(child, "Start")?.textContent, swap);
+            const end = parseCoord(firstByName(child, "End")?.textContent, swap);
+            const pntList =
+                firstByName(child, "PntList2D") ||
+                firstByName(child, "PntList3D") ||
+                child.getElementsByTagNameNS("*", "PntList2D")[0] ||
+                child.getElementsByTagNameNS("*", "PntList3D")[0];
+            const pts = [];
+            if (start) pts.push(start);
+            if (pntList?.textContent) {
+                const nums = pntList.textContent.trim().split(/\s+/).map(Number);
+                const is3d = localName(pntList) === "PntList3D";
+                const stride = is3d ? 3 : 2;
+                for (let i = 0; i + 1 < nums.length; i += stride) {
+                    const raw = is3d
+                        ? `${nums[i]} ${nums[i + 1]}`
+                        : `${nums[i]} ${nums[i + 1]}`;
+                    const p = parseCoord(raw, swap);
+                    if (p) pts.push(p);
+                }
+            }
+            if (end) pts.push(end);
+            if (pts.length) {
+                const total = pts.reduce((acc, p, i) => (i ? acc + dist(pts[i - 1], p) : 0), 0) || len || 1;
+                let traveled = 0;
+                pts.forEach((p, i) => {
+                    if (i) traveled += dist(pts[i - 1], p);
+                    points.push({ ...p, sta: sta + (traveled / total) * (len || total) });
+                });
+            }
+        }
+    }
+
+    return points;
+}
+
+function extractPvis(profile) {
+    const pvis = [];
+    if (!profile) return pvis;
+
+    const pviNodes = profile.getElementsByTagNameNS("*", "PVI");
+    for (let i = 0; i < pviNodes.length; i++) {
+        const text = pviNodes[i].textContent.trim().split(/\s+/);
+        if (text.length >= 2) {
+            const sta = parseFloat(text[0]);
+            const elev = parseFloat(text[1]);
+            if (isFinite(sta) && isFinite(elev)) pvis.push({ sta, elev });
+        }
+    }
+
+    // Some files use CircCurve / ParaCurve with attributes
+    if (!pvis.length) {
+        const candidates = profile.getElementsByTagNameNS("*", "*");
+        for (let i = 0; i < candidates.length; i++) {
+            const n = candidates[i];
+            const tag = localName(n);
+            if (tag !== "CircCurve" && tag !== "ParaCurve" && tag !== "PVI") continue;
+            const sta = parseFloat(n.getAttribute("sta") || n.getAttribute("station"));
+            const elev = parseFloat(n.getAttribute("elev") || n.getAttribute("elevation"));
+            if (isFinite(sta) && isFinite(elev)) pvis.push({ sta, elev });
+        }
+    }
+
+    pvis.sort((a, b) => a.sta - b.sta);
+    return pvis;
+}
+
+function makeElevFn(pvis) {
+    return (s) => {
+        if (!pvis.length) return 0;
+        if (s <= pvis[0].sta) return pvis[0].elev;
+        if (s >= pvis[pvis.length - 1].sta) return pvis[pvis.length - 1].elev;
+        for (let i = 0; i < pvis.length - 1; i++) {
+            if (s >= pvis[i].sta && s <= pvis[i + 1].sta) {
+                const t = (s - pvis[i].sta) / (pvis[i + 1].sta - pvis[i].sta || 1);
+                return pvis[i].elev + t * (pvis[i + 1].elev - pvis[i].elev);
+            }
+        }
+        return 0;
+    };
 }
 
 function processAlignment(align, settings) {
-    const lines = [], texts = [], points = [], toMM = 1000;
-    const cg = align.node.getElementsByTagName('CoordGeom')[0];
-    if (!cg) return { lines, texts };
-    for (const child of cg.children) {
-        if (child.tagName === 'Line') {
-            const s = parseCoord(child.getElementsByTagName('Start')[0]?.textContent, settings.swap);
-            const e = parseCoord(child.getElementsByTagName('End')[0]?.textContent, settings.swap);
-            const sta = parseFloat(child.getAttribute('staStart')), len = parseFloat(child.getAttribute('length'));
-            if (s && e) { points.push({ ...s, sta: sta }); points.push({ ...e, sta: sta + len }); }
-        } else if (child.tagName === 'Curve') {
-            const s = parseCoord(child.getElementsByTagName('Start')[0]?.textContent, settings.swap);
-            const c = parseCoord(child.getElementsByTagName('Center')[0]?.textContent, settings.swap);
-            const e = parseCoord(child.getElementsByTagName('End')[0]?.textContent, settings.swap);
-            const sta = parseFloat(child.getAttribute('staStart')), len = parseFloat(child.getAttribute('length')), rad = parseFloat(child.getAttribute('radius')), rot = child.getAttribute('rot');
-            if (s && c && e) {
-                const segs = Math.max(2, Math.ceil(len / 10)), sA = Math.atan2(s.y - c.y, s.x - c.x);
-                let eA = Math.atan2(e.y - c.y, e.x - c.x);
-                if (rot === 'cw' && eA > sA) eA -= 2 * Math.PI;
-                if (rot === 'ccw' && eA < sA) eA += 2 * Math.PI;
-                for (let i = 0; i <= segs; i++) {
-                    const t = i / segs, a = sA + t * (eA - sA);
-                    points.push({ x: c.x + rad * Math.cos(a), y: c.y + rad * Math.sin(a), sta: sta + t * len });
-                }
-            }
-        }
-    }
-    const pvis = [];
-    if (align.profile) {
-        const pNodes = align.profile.getElementsByTagName('PVI');
-        for (let i = 0; i < pNodes.length; i++) {
-            const pts = pNodes[i].textContent.trim().split(/\s+/);
-            if (pts.length >= 2) pvis.push({ sta: parseFloat(pts[0]), elev: parseFloat(pts[1]) });
-        }
-    }
-    const getEl = (s) => {
-        if (!pvis.length) return 0;
-        if (s <= pvis[0].sta) return pvis[0].elev;
-        if (s >= pvis[pvis.length-1].sta) return pvis[pvis.length-1].elev;
-        for (let i = 0; i < pvis.length - 1; i++) if (s >= pvis[i].sta && s <= pvis[i+1].sta) return pvis[i].elev + ((s - pvis[i].sta) / (pvis[i+1].sta - pvis[i].sta)) * (pvis[i+1].elev - pvis[i].elev);
-        return 0;
-    };
+    const lines = [];
+    const texts = [];
+    const points = collectGeomPoints(align, settings.swap);
+    if (points.length < 2) return { lines, texts };
+
+    const getEl = makeElevFn(extractPvis(align.profile));
+
     if (settings.drawAlign) {
         for (let i = 0; i < points.length - 1; i++) {
-            const p1 = points[i], p2 = points[i+1];
+            const p1 = points[i];
+            const p2 = points[i + 1];
             if (dist(p1, p2) < 0.001) continue;
-            lines.push({ id: idCounter++, color: { r: 255, g: 255, b: 0, a: 1 }, start: { positionX: p1.x * toMM, positionY: p1.y * toMM, positionZ: getEl(p1.sta) * toMM }, end: { positionX: p2.x * toMM, positionY: p2.y * toMM, positionZ: getEl(p2.sta) * toMM } });
+            lines.push({
+                id: idCounter++,
+                color: { r: 255, g: 214, b: 0, a: 1 },
+                start: {
+                    positionX: p1.x * MM,
+                    positionY: p1.y * MM,
+                    positionZ: getEl(p1.sta) * MM
+                },
+                end: {
+                    positionX: p2.x * MM,
+                    positionY: p2.y * MM,
+                    positionZ: getEl(p2.sta) * MM
+                }
+            });
         }
     }
+
     if (settings.drawSta || settings.drawText) {
-        const sSta = points[0]?.sta || 0, eSta = points[points.length-1]?.sta || 0, stations = [sSta];
-        for (let s = Math.ceil(sSta / settings.interval) * settings.interval; s < eSta; s += settings.interval) if (s > sSta + 0.01) stations.push(s);
+        const sSta = points[0].sta || 0;
+        const eSta = points[points.length - 1].sta || 0;
+        const stations = [sSta];
+        const startTick = Math.ceil((sSta + 0.001) / settings.interval) * settings.interval;
+        for (let s = startTick; s < eSta - 0.001; s += settings.interval) stations.push(s);
         if (eSta > sSta + 0.01) stations.push(eSta);
+
         for (const s of stations) {
             const p = interpolate(points, s);
             if (!p) continue;
-            const el = getEl(s), pos = { positionX: p.x * toMM, positionY: p.y * toMM, positionZ: el * toMM };
+            const el = getEl(s);
+            const pos = { positionX: p.x * MM, positionY: p.y * MM, positionZ: el * MM };
+            const isEnd = s === sSta || s === eSta;
+            const color = isEnd
+                ? { r: 255, g: 120, b: 0, a: 1 }
+                : { r: 0, g: 200, b: 220, a: 1 };
+
             if (settings.drawText) {
-                const isEx = (s === sSta || s === eSta);
-                texts.push({ id: idCounter++, text: isEx ? (s === sSta ? `START KM ${formatStation(s)}` : `END KM ${formatStation(s)}`) : `KM ${formatStation(s)}`, color: isEx ? { r: 255, g: 100, b: 0, a: 1 } : { r: 0, g: 255, b: 255, a: 1 }, start: pos, end: { ...pos, positionZ: (el + 1.5) * toMM } });
+                const label = isEnd
+                    ? s === sSta
+                        ? `START ${formatStation(s)}`
+                        : `END ${formatStation(s)}`
+                    : formatStation(s);
+                texts.push({
+                    id: idCounter++,
+                    text: label,
+                    color,
+                    start: pos,
+                    end: { ...pos, positionZ: (el + 1.5) * MM }
+                });
             }
+
             if (settings.drawSta) {
                 const pN = interpolate(points, s + 0.1) || interpolate(points, s - 0.1);
                 if (pN) {
-                    const dx = pN.x - p.x, dy = pN.y - p.y, l = Math.sqrt(dx*dx + dy*dy);
+                    const dx = pN.x - p.x;
+                    const dy = pN.y - p.y;
+                    const l = Math.hypot(dx, dy);
                     if (l > 0.0001) {
-                        const nx = -dy/l, ny = dx/l, tL = (s === sSta || s === eSta) ? 1.5 : 0.8;
-                        lines.push({ id: idCounter++, color: (s === sSta || s === eSta) ? { r: 255, g: 100, b: 0, a: 1 } : { r: 0, g: 255, b: 255, a: 1 }, start: { positionX: (p.x - nx*tL)*toMM, positionY: (p.y - ny*tL)*toMM, positionZ: el*toMM }, end: { positionX: (p.x + nx*tL)*toMM, positionY: (p.y + ny*tL)*toMM, positionZ: el*toMM } });
+                        const nx = -dy / l;
+                        const ny = dx / l;
+                        const tL = isEnd ? 1.5 : 0.8;
+                        lines.push({
+                            id: idCounter++,
+                            color,
+                            start: {
+                                positionX: (p.x - nx * tL) * MM,
+                                positionY: (p.y - ny * tL) * MM,
+                                positionZ: el * MM
+                            },
+                            end: {
+                                positionX: (p.x + nx * tL) * MM,
+                                positionY: (p.y + ny * tL) * MM,
+                                positionZ: el * MM
+                            }
+                        });
                     }
                 }
             }
         }
     }
+
     return { lines, texts };
 }
 
-function isValid(p) { return p && !isNaN(p.x) && !isNaN(p.y); }
-function dist(p1, p2) { return Math.sqrt(Math.pow(p1.x-p2.x, 2) + Math.pow(p1.y-p2.y, 2)); }
-function parseCoord(str, swap) {
-    if (!str) return null;
-    const pts = str.trim().split(/\s+/);
-    const x = parseFloat(pts[0]), y = parseFloat(pts[1]);
-    return swap ? { x: y, y: x } : { x: x, y: y };
-}
-function interpolate(pts, s) {
-    if (!pts.length) return null;
-    if (s <= pts[0].sta + 0.001) return pts[0];
-    if (s >= pts[pts.length-1].sta - 0.001) return pts[pts.length-1];
-    for (let i = 0; i < pts.length - 1; i++) if (s >= pts[i].sta && s <= pts[i+1].sta) {
-        const t = (s - pts[i].sta) / (pts[i+1].sta - pts[i].sta);
-        return { x: pts[i].x + t*(pts[i+1].x-pts[i].x), y: pts[i].y + t*(pts[i+1].y-pts[i].y) };
-    }
-    return null;
-}
+// Events
+els.reloadBtn.addEventListener("click", loadProjectFiles);
+els.projectFiles.addEventListener("change", handleFileSelection);
+els.drawBtn.addEventListener("click", drawSelectedAlignments);
+els.clearBtn.addEventListener("click", clearMarkups);
+els.selectAllBtn.addEventListener("click", () => setAllChecks(true));
+els.selectNoneBtn.addEventListener("click", () => setAllChecks(false));
+els.listItems.addEventListener("change", syncActionButtons);
 
 initTC();

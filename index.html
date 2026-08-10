@@ -3,68 +3,86 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>LandXML Alignment Visualizer</title>
+    <title>Alignment Visualizer</title>
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
-    <div id="container">
-        <header>
-            <nav class="tabs">
-                <button class="tab-btn active" data-tab="alignment">Alignments</button>
-                <button class="tab-btn" data-tab="report">Project Report</button>
-            </nav>
+    <!-- Direction: Fix region/files/profiles/N-E + Trimble-native panel; Power BI dropped. -->
+    <div id="app">
+        <header class="app-header">
+            <div class="app-title">
+                <span class="app-title-text">Alignments</span>
+                <span id="version-display" class="app-version">v1.1.0</span>
+            </div>
         </header>
-        <main>
-            <!-- Alignment Tab Content -->
-            <div id="alignment-tab" class="tab-content">
-                <div class="controls">
-                    <div id="file-picker-container">
-                        <select id="project-files">
-                            <option value="">-- Select LandXML from Project --</option>
-                        </select>
-                        <button id="reload-files-btn" class="button small">🔄</button>
-                    </div>
-                    <button id="clear-btn" class="button secondary">Clear Viewer</button>
-                </div>
-                <div id="status-container">
-                    <p id="status">Waiting for LandXML file...</p>
-                    <div id="alignment-list" class="hidden">
-                        <h3>Select Alignments:</h3>
-                        <div id="list-items"></div>
-                        <button id="draw-btn" class="button">Draw Selected</button>
-                    </div>
-                </div>
-                <div class="settings">
-                    <label>
-                        <input type="checkbox" id="draw-alignments" checked> Show Alignment Lines
-                    </label>
-                    <label>
-                        <input type="checkbox" id="draw-stationing" checked> Show Stationing Ticks
-                    </label>
-                    <label>
-                        <input type="checkbox" id="draw-text" checked> Show KM Labels
-                    </label>
-                    <hr>
-                    <label>
-                        Stationing Interval:
-                        <input type="number" id="station-interval" value="100" min="10" step="10"> m
-                    </label>
-                </div>
-            </div>
 
-            <!-- Report Tab Content -->
-            <div id="report-tab" class="tab-content hidden">
-                <iframe id="pbi-report" 
-                    src="https://app.powerbi.com/reportEmbed?reportId=12bf1821-e1d7-413c-97a6-76bd0c478b55&autoAuth=true&ctid=0dd66dd6-0730-47ae-b2f3-ba1f625c6192"
-                    frameborder="0" 
-                    allowFullScreen="true">
-                </iframe>
-            </div>
+        <main class="app-main">
+            <section class="panel-section">
+                <div class="section-label-row">
+                    <label class="section-label" for="project-files">LandXML file</label>
+                    <button id="reload-files-btn" class="icon-btn" type="button" title="Reload project files" aria-label="Reload project files">
+                        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                            <path d="M13.5 8a5.5 5.5 0 1 1-1.4-3.6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+                            <path d="M13.5 3.5v3h-3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                        </svg>
+                    </button>
+                </div>
+                <select id="project-files" class="select" disabled>
+                    <option value="">Connecting…</option>
+                </select>
+            </section>
+
+            <section id="status-bar" class="status-bar" data-tone="info" role="status">
+                <span id="status">Connecting to Trimble Connect…</span>
+            </section>
+
+            <section id="alignment-section" class="panel-section hidden">
+                <div class="section-label-row">
+                    <span class="section-label">Alignments <span id="alignment-count" class="muted"></span></span>
+                    <div class="link-actions">
+                        <button type="button" id="select-all-btn" class="text-btn">All</button>
+                        <button type="button" id="select-none-btn" class="text-btn">None</button>
+                    </div>
+                </div>
+                <div id="list-items" class="alignment-list"></div>
+            </section>
+
+            <section class="panel-section">
+                <span class="section-label">Display</span>
+                <div class="settings-list">
+                    <label class="check-row">
+                        <input type="checkbox" id="draw-alignments" checked>
+                        <span>Alignment lines</span>
+                    </label>
+                    <label class="check-row">
+                        <input type="checkbox" id="draw-stationing" checked>
+                        <span>Station ticks</span>
+                    </label>
+                    <label class="check-row">
+                        <input type="checkbox" id="draw-text" checked>
+                        <span>Station labels</span>
+                    </label>
+                    <label class="check-row">
+                        <input type="checkbox" id="swap-ne" checked>
+                        <span>Swap Northing / Easting</span>
+                    </label>
+                    <label class="field-row" for="station-interval">
+                        <span>Station interval</span>
+                        <span class="field-inline">
+                            <input type="number" id="station-interval" class="input-num" value="100" min="1" step="1">
+                            <span class="unit">m</span>
+                        </span>
+                    </label>
+                </div>
+            </section>
         </main>
-        <footer>
-            <p>Trimble Connect Extension <span id="version-display">v1.0.5</span></p>
+
+        <footer class="app-footer">
+            <button id="draw-btn" class="btn btn-primary" type="button" disabled>Draw selected</button>
+            <button id="clear-btn" class="btn btn-secondary" type="button" disabled>Clear viewer</button>
         </footer>
     </div>
+
     <script src="https://components.connect.trimble.com/trimble-connect-workspace-api/index.js"></script>
     <script src="app.js"></script>
 </body>
