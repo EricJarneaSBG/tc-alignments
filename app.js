@@ -1,8 +1,8 @@
 /**
  * LandXML Alignment Stationing for Trimble Connect
- * Station ticks/labels from LandXML; alignment names resolved from IFC SBG_STATION_REF.
+ * Station ticks/labels from LandXML; list labels use Alignment desc when present.
  */
-const VERSION = "v1.2.1";
+const VERSION = "v1.2.2";
 console.log(`Alignment Stationing ${VERSION} loaded.`);
 
 const REGION_BASES = {
@@ -37,9 +37,6 @@ let apiBaseUrl = null;
 let apiBaseCandidates = [];
 let projectInfo = null;
 let fileCatalog = new Map();
-let ifcCatalog = new Map();
-let selectedIfcIds = new Set();
-let alignmentNameMap = new Map();
 let alignments = [];
 let activeMarkupIds = [];
 let idCounter = 1;
@@ -60,8 +57,6 @@ const els = {
     drawStationing: document.getElementById("draw-stationing"),
     drawText: document.getElementById("draw-text"),
     stationInterval: document.getElementById("station-interval"),
-    ifcList: document.getElementById("ifc-list"),
-    ifcMatchCount: document.getElementById("ifc-match-count"),
     version: document.getElementById("version-display")
 };
 
@@ -77,9 +72,6 @@ function setBusy(isBusy) {
     els.reloadBtn.classList.toggle("is-busy", isBusy);
     els.reloadBtn.disabled = isBusy || !TC_API;
     els.projectFiles.disabled = isBusy || !TC_API;
-    els.ifcList?.querySelectorAll("input[type=checkbox]").forEach((cb) => {
-        cb.disabled = isBusy || !TC_API;
-    });
     syncActionButtons();
 }
 
@@ -289,12 +281,7 @@ function isLandXmlFile(item) {
     return name.endsWith(".xml") || name.endsWith(".landxml");
 }
 
-function isIfcFile(item) {
-    if (!item || item.type !== "FILE" || !item.name) return false;
-    return item.name.toLowerCase().endsWith(".ifc");
-}
-
-async function findProjectFiles(baseUrl, rootId, token, filterFn) {
+async function findLandXmlFiles(baseUrl, rootId, token) {
     const found = [];
     const queue = [{ id: rootId, path: "" }];
     let foldersVisited = 0;
@@ -312,7 +299,7 @@ async function findProjectFiles(baseUrl, rootId, token, filterFn) {
         }
 
         for (const item of items) {
-            if (filterFn(item)) {
+            if (isLandXmlFile(item)) {
                 found.push({
                     id: item.id,
                     name: item.name,
@@ -332,14 +319,6 @@ async function findProjectFiles(baseUrl, rootId, token, filterFn) {
 
     found.sort((a, b) => a.path.localeCompare(b.path, undefined, { sensitivity: "base" }));
     return found;
-}
-
-async function findLandXmlFiles(baseUrl, rootId, token) {
-    return findProjectFiles(baseUrl, rootId, token, isLandXmlFile);
-}
-
-async function findIfcFiles(baseUrl, rootId, token) {
-    return findProjectFiles(baseUrl, rootId, token, isIfcFile);
 }
 
 async function initTC() {
@@ -389,7 +368,7 @@ async function initTC() {
 async function loadProjectFiles() {
     if (!TC_API || busy) return;
     setBusy(true);
-    updateStatus("Scanning project for LandXML and IFC files…", "info");
+    updateStatus("Scanning project for LandXML files…", "info");
     els.projectFiles.innerHTML = '<option value="">Loading…</option>';
 
     try {
@@ -400,26 +379,12 @@ async function loadProjectFiles() {
         apiBaseCandidates = uniqueBases([ctx.baseUrl, ...apiBaseCandidates]);
         projectInfo = { ...projectInfo, ...ctx.project, rootId: ctx.rootId };
 
-        const [files, ifcFiles] = await Promise.all([
-            findLandXmlFiles(apiBaseUrl, ctx.rootId, token),
-            findIfcFiles(apiBaseUrl, ctx.rootId, token)
-        ]);
-
+        const files = await findLandXmlFiles(apiBaseUrl, ctx.rootId, token);
         fileCatalog = new Map();
-        ifcCatalog = new Map();
-        selectedIfcIds = new Set([...selectedIfcIds].filter((id) => ifcFiles.some((f) => f.id === id)));
-
-        for (const file of ifcFiles) ifcCatalog.set(file.id, file);
-        renderIfcList(ifcFiles);
 
         if (files.length === 0) {
             els.projectFiles.innerHTML = '<option value="">No LandXML files found</option>';
-            updateStatus(
-                ifcFiles.length
-                    ? `No LandXML files found. ${ifcFiles.length} IFC file${ifcFiles.length === 1 ? "" : "s"} available for naming.`
-                    : "No .xml / .landxml files found in this project.",
-                "warn"
-            );
+            updateStatus("No .xml / .landxml files found in this project.", "warn");
         } else {
             els.projectFiles.innerHTML = '<option value="">Select a LandXML file…</option>';
             for (const file of files) {
@@ -430,17 +395,12 @@ async function loadProjectFiles() {
                 opt.title = file.path;
                 els.projectFiles.appendChild(opt);
             }
-            const ifcPart = ifcFiles.length ? ` · ${ifcFiles.length} IFC` : "";
-            updateStatus(`Found ${files.length} LandXML${ifcPart}.`, "success");
+            updateStatus(`Found ${files.length} LandXML file${files.length === 1 ? "" : "s"}.`, "success");
         }
-
-        if (alignments.length && selectedIfcIds.size) await refreshAlignmentNames(false);
-        else updateIfcMatchCount();
     } catch (e) {
         console.error("Load files error:", e);
         updateStatus(`Could not list files: ${e.message}`, "error");
         els.projectFiles.innerHTML = '<option value="">-- Error loading files --</option>';
-        renderIfcList([]);
     } finally {
         setBusy(false);
     }
@@ -495,14 +455,10 @@ async function resolveDownloadUrl(fileMeta, token) {
     throw lastError || new Error("Could not resolve download URL.");
 }
 
-async function downloadProjectFileText(fileMeta) {
+async function downloadLandXml(fileMeta) {
     const token = await getAccessToken();
     const url = await resolveDownloadUrl(fileMeta, token);
     return fetchFileText(url);
-}
-
-async function downloadLandXml(fileMeta) {
-    return downloadProjectFileText(fileMeta);
 }
 
 async function handleConnectFileSelected(file) {
@@ -549,217 +505,25 @@ async function handleFileSelection() {
     await loadLandXmlFromProject(fileMeta);
 }
 
-function renderIfcList(files) {
-    if (!els.ifcList) return;
-    if (!files.length) {
-        els.ifcList.innerHTML = '<p class="placeholder-text">No IFC files found in this project.</p>';
-        return;
-    }
-
-    els.ifcList.innerHTML = "";
-    for (const file of files) {
-        const row = document.createElement("label");
-        row.className = "ifc-item check-row";
-        const cb = document.createElement("input");
-        cb.type = "checkbox";
-        cb.value = file.id;
-        cb.checked = selectedIfcIds.has(file.id);
-        cb.addEventListener("change", () => {
-            if (cb.checked) selectedIfcIds.add(file.id);
-            else selectedIfcIds.delete(file.id);
-            refreshAlignmentNames();
-        });
-        const span = document.createElement("span");
-        span.textContent = file.path;
-        span.title = file.path;
-        row.appendChild(cb);
-        row.appendChild(span);
-        els.ifcList.appendChild(row);
-    }
-}
-
-/** Normalize codes so A10000A, 10000A, Alignment 10000A all share one key. */
-function coreAlignmentCode(value) {
-    let s = String(value || "")
-        .trim()
-        .toUpperCase()
-        .replace(/^ALIGNMENT[\s:_-]*/, "");
-    if (!s) return "";
-
-    // Prefer the station-style token (A10000A / 10000A), even inside longer names
-    const token = s.match(/(?:^|[^A-Z0-9])(A?\d{3,}[A-Z]?)(?:[^A-Z0-9]|$)/) || s.match(/(A?\d{3,}[A-Z]?)/);
-    if (token) {
-        let code = token[1];
-        if (/^A\d/.test(code)) code = code.slice(1);
-        return code;
-    }
-
-    s = s.replace(/[^A-Z0-9]/g, "");
-    if (/^A\d/.test(s)) s = s.slice(1);
-    return s;
-}
-
-function storeAlignmentName(map, codeRaw, label) {
-    const name = String(label || "").trim();
-    if (!name) return;
-    const core = coreAlignmentCode(codeRaw);
-    if (!core) return;
-    if (!map.has(core)) map.set(core, name);
-    // Also keep exact uppercase token for rare non-numeric names
-    const exact = String(codeRaw || "")
-        .trim()
-        .toUpperCase()
-        .replace(/[^A-Z0-9]/g, "");
-    if (exact && !map.has(exact)) map.set(exact, name);
-}
-
-function addStationRefMatch(map, raw) {
-    const text = String(raw || "").trim();
-    if (!text) return;
-
-    let match =
-        text.match(/Alignment\s+([A-Za-z0-9_-]+)\s*\(([^)]+)\)/i) ||
-        text.match(/\b(A?\d+[A-Za-z]?)\b\s*\(([^)]+)\)/) ||
-        text.match(/\b(A?\d+[A-Za-z]?)\b\s*[-–:]\s*(.+)$/);
-
-    if (match) {
-        storeAlignmentName(map, match[1], match[2]);
-        return;
-    }
-
-    // Fallback: "SBG_STATION_REF = Main Road" without code — ignore
-}
-
-function parseAlignmentNamesFromIfc(text) {
-    const map = new Map();
-    const patterns = [
-        /Alignment\s+([A-Za-z0-9_-]+)\s*\(([^)]+)\)/gi,
-        /\b(A?\d{3,}[A-Za-z]?)\b\s*\(([^)]+)\)/g
-    ];
-
-    for (const broad of patterns) {
-        let m;
-        while ((m = broad.exec(text)) !== null) {
-            storeAlignmentName(map, m[1], m[2]);
-        }
-    }
-
-    // IFC STEP: IFCPROPERTYSINGLEVALUE('SBG_STATION_REF',$,IFCLABEL('...'),$)
-    const propPattern =
-        /SBG_STATION_REF[\s\S]{0,120}?IFC(?:LABEL|TEXT|IDENTIFIER)\s*\(\s*'([^']+)'\s*\)/gi;
-    let m;
-    while ((m = propPattern.exec(text)) !== null) addStationRefMatch(map, m[1]);
-
-    const quotedProp = /SBG_STATION_REF[^'"]{0,80}['"]([^'"]+)['"]/gi;
-    while ((m = quotedProp.exec(text)) !== null) addStationRefMatch(map, m[1]);
-
-    return map;
-}
-
-function resolveAlignmentDisplayName(landXmlName) {
-    const core = coreAlignmentCode(landXmlName);
-    if (core && alignmentNameMap.has(core)) return alignmentNameMap.get(core);
-
-    const exact = String(landXmlName || "")
-        .trim()
-        .toUpperCase()
-        .replace(/[^A-Z0-9]/g, "");
-    if (exact && alignmentNameMap.has(exact)) return alignmentNameMap.get(exact);
-
-    // Last resort: one side may still carry a leading A in the map key
-    if (core) {
-        for (const [key, label] of alignmentNameMap) {
-            if (coreAlignmentCode(key) === core) return label;
-        }
-    }
-    return null;
-}
-
-function updateIfcMatchCount() {
-    if (!els.ifcMatchCount) return;
-    if (!alignments.length) {
-        els.ifcMatchCount.textContent = alignmentNameMap.size ? `${alignmentNameMap.size} names` : "";
-        return;
-    }
-    let matched = 0;
-    for (const align of alignments) {
-        if (resolveAlignmentDisplayName(align.name)) matched += 1;
-    }
-    if (matched) els.ifcMatchCount.textContent = `${matched}/${alignments.length} named`;
-    else if (alignmentNameMap.size) els.ifcMatchCount.textContent = `${alignmentNameMap.size} names`;
-    else els.ifcMatchCount.textContent = "";
-}
-
-async function refreshAlignmentNames(updateStatusBar = true) {
-    if (!selectedIfcIds.size) {
-        alignmentNameMap = new Map();
-        updateIfcMatchCount();
-        if (alignments.length) renderAlignmentList();
-        return;
-    }
-
-    if (updateStatusBar) updateStatus("Reading IFC name sources…", "info");
-    try {
-        const merged = new Map();
-        for (const id of selectedIfcIds) {
-            const meta = ifcCatalog.get(id);
-            if (!meta) continue;
-            try {
-                const text = await downloadProjectFileText(meta);
-                const map = parseAlignmentNamesFromIfc(text);
-                for (const [code, label] of map) {
-                    if (!merged.has(code)) merged.set(code, label);
-                }
-            } catch (err) {
-                console.warn(`IFC parse failed for ${meta.path}:`, err);
-            }
-        }
-        alignmentNameMap = merged;
-        updateIfcMatchCount();
-        if (alignments.length) renderAlignmentList();
-        if (updateStatusBar) {
-            let matched = 0;
-            for (const align of alignments) {
-                if (resolveAlignmentDisplayName(align.name)) matched += 1;
-            }
-            if (alignments.length) {
-                updateStatus(
-                    `IFC names: ${alignmentNameMap.size} found, ${matched}/${alignments.length} matched.`,
-                    matched ? "success" : alignmentNameMap.size ? "warn" : "info"
-                );
-            } else {
-                updateStatus(
-                    `Loaded ${alignmentNameMap.size} alignment name${alignmentNameMap.size === 1 ? "" : "s"} from IFC.`,
-                    "success"
-                );
-            }
-        }
-    } catch (e) {
-        console.error("IFC name refresh failed:", e);
-        if (updateStatusBar) updateStatus(`Could not read IFC names: ${e.message}`, "error");
-    }
-}
-
 function buildAlignmentLabelHtml(align) {
     const name = align.name;
-    const displayName = resolveAlignmentDisplayName(name);
-    const node = align.node;
-    const lengthAttr = node.getAttribute("length");
-    const staStart = node.getAttribute("staStart");
+    const desc = (align.desc || "").trim();
+    const lengthAttr = align.node.getAttribute("length");
+    const staStart = align.node.getAttribute("staStart");
     const metaParts = [];
     if (staStart != null) metaParts.push(`Start ${formatStation(parseFloat(staStart) || 0)}`);
     if (lengthAttr != null) metaParts.push(`${Number(lengthAttr).toFixed(1)} m`);
     if (align.profile) metaParts.push("profile");
 
-    if (displayName) {
+    if (desc && desc !== name) {
         return `
-            <span class="alignment-title">${escapeHtml(displayName)}</span>
+            <span class="alignment-title">${escapeHtml(desc)}</span>
             <span class="alignment-code">${escapeHtml(name)}</span>
             ${metaParts.length ? `<span class="alignment-meta">${escapeHtml(metaParts.join(" · "))}</span>` : ""}
         `;
     }
     return `
-        ${escapeHtml(name)}
+        <span class="alignment-title">${escapeHtml(name)}</span>
         ${metaParts.length ? `<span class="alignment-meta">${escapeHtml(metaParts.join(" · "))}</span>` : ""}
     `;
 }
@@ -825,7 +589,6 @@ function parseLandXML(xmlText) {
     if (alignmentNodes.length === 0) {
         updateStatus("No <Alignment> elements found in this file.", "warn");
         els.alignmentSection.classList.add("hidden");
-        updateIfcMatchCount();
         syncActionButtons();
         return;
     }
@@ -833,14 +596,13 @@ function parseLandXML(xmlText) {
     for (let i = 0; i < alignmentNodes.length; i++) {
         const node = alignmentNodes[i];
         const name = node.getAttribute("name") || `Alignment ${i + 1}`;
+        const desc = node.getAttribute("desc") || "";
         const profile = findProfileForAlignment(node, name, xmlDoc);
 
-        alignments.push({ id: i, name, node, profile });
+        alignments.push({ id: i, name, desc, node, profile });
     }
 
     renderAlignmentList();
-    updateIfcMatchCount();
-    if (selectedIfcIds.size) refreshAlignmentNames(false);
     updateStatus(`Loaded ${alignments.length} alignment${alignments.length === 1 ? "" : "s"}.`, "success");
 }
 
