@@ -2,8 +2,8 @@
  * LandXML Alignment Stationing for Trimble Connect
  * Station ticks/labels from LandXML; alignment names resolved from IFC SBG_STATION_REF.
  */
-const VERSION = "v1.2.0";
-console.log(`Alignment Visualizer ${VERSION} loaded.`);
+const VERSION = "v1.2.1";
+console.log(`Alignment Stationing ${VERSION} loaded.`);
 
 const REGION_BASES = {
     northamerica: "https://app.connect.trimble.com/tc/api/2.0",
@@ -146,16 +146,29 @@ function getConnectHostBase() {
     return null;
 }
 
+function isWebConnectHost(base) {
+    try {
+        const host = new URL(base).hostname.toLowerCase();
+        return host === "web.connect.trimble.com" || host === "connect.trimble.com";
+    } catch (e) {
+        return false;
+    }
+}
+
 function buildApiBaseCandidates(project) {
     const bases = [];
-    const connectHost = getConnectHostBase();
-    if (connectHost) bases.push(connectHost);
-
+    // Prefer regional appXX hosts. web.connect.trimble.com rejects CORS from GitHub Pages,
+    // so it only produces console noise when tried first (downloads still succeed via fallback).
     const regional = baseUrlForLocation(project?.location);
-    if (regional && !bases.includes(regional)) bases.push(regional);
+    if (regional) bases.push(regional);
 
     for (const base of FALLBACK_BASES) {
         if (!bases.includes(base)) bases.push(base);
+    }
+
+    const connectHost = getConnectHostBase();
+    if (connectHost && !bases.includes(connectHost) && !isWebConnectHost(connectHost)) {
+        bases.push(connectHost);
     }
     return bases;
 }
@@ -165,7 +178,12 @@ function uniqueBases(bases) {
 }
 
 async function tcFetch(path, token, options = {}) {
-    const bases = uniqueBases(options.bases || apiBaseCandidates.length ? apiBaseCandidates : [apiBaseUrl]);
+    const preferred = options.bases && options.bases.length
+        ? options.bases
+        : apiBaseCandidates.length
+          ? apiBaseCandidates
+          : [apiBaseUrl];
+    const bases = uniqueBases(preferred).filter((base) => !isWebConnectHost(base));
     let lastError = null;
 
     for (const base of bases) {
@@ -560,38 +578,101 @@ function renderIfcList(files) {
     }
 }
 
+/** Normalize codes so A10000A, 10000A, Alignment 10000A all share one key. */
+function coreAlignmentCode(value) {
+    let s = String(value || "")
+        .trim()
+        .toUpperCase()
+        .replace(/^ALIGNMENT[\s:_-]*/, "");
+    if (!s) return "";
+
+    // Prefer the station-style token (A10000A / 10000A), even inside longer names
+    const token = s.match(/(?:^|[^A-Z0-9])(A?\d{3,}[A-Z]?)(?:[^A-Z0-9]|$)/) || s.match(/(A?\d{3,}[A-Z]?)/);
+    if (token) {
+        let code = token[1];
+        if (/^A\d/.test(code)) code = code.slice(1);
+        return code;
+    }
+
+    s = s.replace(/[^A-Z0-9]/g, "");
+    if (/^A\d/.test(s)) s = s.slice(1);
+    return s;
+}
+
+function storeAlignmentName(map, codeRaw, label) {
+    const name = String(label || "").trim();
+    if (!name) return;
+    const core = coreAlignmentCode(codeRaw);
+    if (!core) return;
+    if (!map.has(core)) map.set(core, name);
+    // Also keep exact uppercase token for rare non-numeric names
+    const exact = String(codeRaw || "")
+        .trim()
+        .toUpperCase()
+        .replace(/[^A-Z0-9]/g, "");
+    if (exact && !map.has(exact)) map.set(exact, name);
+}
+
 function addStationRefMatch(map, raw) {
-    const match = String(raw).match(/Alignment\s+([A-Za-z0-9]+)\s*\(([^)]+)\)/i);
-    if (match) map.set(match[1].toUpperCase(), match[2].trim());
+    const text = String(raw || "").trim();
+    if (!text) return;
+
+    let match =
+        text.match(/Alignment\s+([A-Za-z0-9_-]+)\s*\(([^)]+)\)/i) ||
+        text.match(/\b(A?\d+[A-Za-z]?)\b\s*\(([^)]+)\)/) ||
+        text.match(/\b(A?\d+[A-Za-z]?)\b\s*[-–:]\s*(.+)$/);
+
+    if (match) {
+        storeAlignmentName(map, match[1], match[2]);
+        return;
+    }
+
+    // Fallback: "SBG_STATION_REF = Main Road" without code — ignore
 }
 
 function parseAlignmentNamesFromIfc(text) {
     const map = new Map();
-    const broad = /Alignment\s+([A-Za-z0-9]+)\s*\(([^)]+)\)/g;
-    let m;
-    while ((m = broad.exec(text)) !== null) {
-        const code = m[1].toUpperCase();
-        const label = m[2].trim();
-        if (code && label && !map.has(code)) map.set(code, label);
+    const patterns = [
+        /Alignment\s+([A-Za-z0-9_-]+)\s*\(([^)]+)\)/gi,
+        /\b(A?\d{3,}[A-Za-z]?)\b\s*\(([^)]+)\)/g
+    ];
+
+    for (const broad of patterns) {
+        let m;
+        while ((m = broad.exec(text)) !== null) {
+            storeAlignmentName(map, m[1], m[2]);
+        }
     }
 
-    const propPattern = /SBG_STATION_REF[^'"]*['"]([^'"]+)['"]/gi;
+    // IFC STEP: IFCPROPERTYSINGLEVALUE('SBG_STATION_REF',$,IFCLABEL('...'),$)
+    const propPattern =
+        /SBG_STATION_REF[\s\S]{0,120}?IFC(?:LABEL|TEXT|IDENTIFIER)\s*\(\s*'([^']+)'\s*\)/gi;
+    let m;
     while ((m = propPattern.exec(text)) !== null) addStationRefMatch(map, m[1]);
+
+    const quotedProp = /SBG_STATION_REF[^'"]{0,80}['"]([^'"]+)['"]/gi;
+    while ((m = quotedProp.exec(text)) !== null) addStationRefMatch(map, m[1]);
 
     return map;
 }
 
-function extractAlignmentCode(landXmlName) {
-    const n = String(landXmlName || "").trim();
-    if (!n) return "";
-    const withoutPrefix = n.replace(/^A(?=[0-9])/i, "");
-    const match = withoutPrefix.match(/([0-9]+[A-Za-z]?)/);
-    return (match ? match[1] : withoutPrefix).toUpperCase();
-}
-
 function resolveAlignmentDisplayName(landXmlName) {
-    const code = extractAlignmentCode(landXmlName);
-    return code ? alignmentNameMap.get(code) || null : null;
+    const core = coreAlignmentCode(landXmlName);
+    if (core && alignmentNameMap.has(core)) return alignmentNameMap.get(core);
+
+    const exact = String(landXmlName || "")
+        .trim()
+        .toUpperCase()
+        .replace(/[^A-Z0-9]/g, "");
+    if (exact && alignmentNameMap.has(exact)) return alignmentNameMap.get(exact);
+
+    // Last resort: one side may still carry a leading A in the map key
+    if (core) {
+        for (const [key, label] of alignmentNameMap) {
+            if (coreAlignmentCode(key) === core) return label;
+        }
+    }
+    return null;
 }
 
 function updateIfcMatchCount() {
@@ -637,10 +718,21 @@ async function refreshAlignmentNames(updateStatusBar = true) {
         updateIfcMatchCount();
         if (alignments.length) renderAlignmentList();
         if (updateStatusBar) {
-            updateStatus(
-                `Loaded ${alignmentNameMap.size} alignment name${alignmentNameMap.size === 1 ? "" : "s"} from IFC.`,
-                "success"
-            );
+            let matched = 0;
+            for (const align of alignments) {
+                if (resolveAlignmentDisplayName(align.name)) matched += 1;
+            }
+            if (alignments.length) {
+                updateStatus(
+                    `IFC names: ${alignmentNameMap.size} found, ${matched}/${alignments.length} matched.`,
+                    matched ? "success" : alignmentNameMap.size ? "warn" : "info"
+                );
+            } else {
+                updateStatus(
+                    `Loaded ${alignmentNameMap.size} alignment name${alignmentNameMap.size === 1 ? "" : "s"} from IFC.`,
+                    "success"
+                );
+            }
         }
     } catch (e) {
         console.error("IFC name refresh failed:", e);
@@ -673,12 +765,18 @@ function buildAlignmentLabelHtml(align) {
 }
 
 function renderAlignmentList() {
+    const previouslyChecked = new Set(
+        Array.from(els.listItems.querySelectorAll("input:checked")).map((cb) => cb.value)
+    );
+    const hadChecks = els.listItems.querySelectorAll("input[type=checkbox]").length > 0;
+
     els.listItems.innerHTML = "";
     for (const align of alignments) {
         const div = document.createElement("div");
         div.className = "alignment-item";
+        const checked = !hadChecks || previouslyChecked.has(String(align.id));
         div.innerHTML = `
-            <input type="checkbox" id="align-${align.id}" value="${align.id}" checked>
+            <input type="checkbox" id="align-${align.id}" value="${align.id}" ${checked ? "checked" : ""}>
             <label for="align-${align.id}">${buildAlignmentLabelHtml(align)}</label>
         `;
         els.listItems.appendChild(div);

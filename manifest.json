@@ -3,6 +3,6 @@
   "icon": "https://img.icons8.com/color/48/000000/road.png",
   "url": "https://ericjarneasbg.github.io/tc-alignments/index.html",
   "description": "Applies LandXML station ticks and labels in the 3D viewer, with optional IFC-based alignment names.",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "requiredScopes": ["project:read", "file:read", "folder:read"]
 }
