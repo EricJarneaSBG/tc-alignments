@@ -1,9 +1,8 @@
 /**
- * LandXML Alignment Visualizer for Trimble Connect
- * Direction: region-aware file loading, recursive discovery, correct profiles,
- * optional N/E swap, Trimble-native panel; Power BI tab removed.
+ * LandXML Alignment Stationing for Trimble Connect
+ * Station ticks/labels from LandXML; alignment names resolved from IFC SBG_STATION_REF.
  */
-const VERSION = "v1.1.1";
+const VERSION = "v1.2.0";
 console.log(`Alignment Visualizer ${VERSION} loaded.`);
 
 const REGION_BASES = {
@@ -31,11 +30,16 @@ const BATCH = 40;
 const MAX_FOLDER_DEPTH = 8;
 const MAX_FOLDERS = 200;
 
+const SWAP_NE = true;
+
 let TC_API = null;
 let apiBaseUrl = null;
 let apiBaseCandidates = [];
 let projectInfo = null;
 let fileCatalog = new Map();
+let ifcCatalog = new Map();
+let selectedIfcIds = new Set();
+let alignmentNameMap = new Map();
 let alignments = [];
 let activeMarkupIds = [];
 let idCounter = 1;
@@ -53,13 +57,11 @@ const els = {
     reloadBtn: document.getElementById("reload-files-btn"),
     selectAllBtn: document.getElementById("select-all-btn"),
     selectNoneBtn: document.getElementById("select-none-btn"),
-    drawAlignments: document.getElementById("draw-alignments"),
     drawStationing: document.getElementById("draw-stationing"),
     drawText: document.getElementById("draw-text"),
-    swapNE: document.getElementById("swap-ne"),
     stationInterval: document.getElementById("station-interval"),
-    localFileInput: document.getElementById("local-file-input"),
-    localFileBtn: document.getElementById("local-file-btn"),
+    ifcList: document.getElementById("ifc-list"),
+    ifcMatchCount: document.getElementById("ifc-match-count"),
     version: document.getElementById("version-display")
 };
 
@@ -75,6 +77,9 @@ function setBusy(isBusy) {
     els.reloadBtn.classList.toggle("is-busy", isBusy);
     els.reloadBtn.disabled = isBusy || !TC_API;
     els.projectFiles.disabled = isBusy || !TC_API;
+    els.ifcList?.querySelectorAll("input[type=checkbox]").forEach((cb) => {
+        cb.disabled = isBusy || !TC_API;
+    });
     syncActionButtons();
 }
 
@@ -266,7 +271,12 @@ function isLandXmlFile(item) {
     return name.endsWith(".xml") || name.endsWith(".landxml");
 }
 
-async function findLandXmlFiles(baseUrl, rootId, token) {
+function isIfcFile(item) {
+    if (!item || item.type !== "FILE" || !item.name) return false;
+    return item.name.toLowerCase().endsWith(".ifc");
+}
+
+async function findProjectFiles(baseUrl, rootId, token, filterFn) {
     const found = [];
     const queue = [{ id: rootId, path: "" }];
     let foldersVisited = 0;
@@ -284,7 +294,7 @@ async function findLandXmlFiles(baseUrl, rootId, token) {
         }
 
         for (const item of items) {
-            if (isLandXmlFile(item)) {
+            if (filterFn(item)) {
                 found.push({
                     id: item.id,
                     name: item.name,
@@ -304,6 +314,14 @@ async function findLandXmlFiles(baseUrl, rootId, token) {
 
     found.sort((a, b) => a.path.localeCompare(b.path, undefined, { sensitivity: "base" }));
     return found;
+}
+
+async function findLandXmlFiles(baseUrl, rootId, token) {
+    return findProjectFiles(baseUrl, rootId, token, isLandXmlFile);
+}
+
+async function findIfcFiles(baseUrl, rootId, token) {
+    return findProjectFiles(baseUrl, rootId, token, isIfcFile);
 }
 
 async function initTC() {
@@ -353,7 +371,7 @@ async function initTC() {
 async function loadProjectFiles() {
     if (!TC_API || busy) return;
     setBusy(true);
-    updateStatus("Scanning project for LandXML files…", "info");
+    updateStatus("Scanning project for LandXML and IFC files…", "info");
     els.projectFiles.innerHTML = '<option value="">Loading…</option>';
 
     try {
@@ -364,11 +382,26 @@ async function loadProjectFiles() {
         apiBaseCandidates = uniqueBases([ctx.baseUrl, ...apiBaseCandidates]);
         projectInfo = { ...projectInfo, ...ctx.project, rootId: ctx.rootId };
 
-        const files = await findLandXmlFiles(apiBaseUrl, ctx.rootId, token);
+        const [files, ifcFiles] = await Promise.all([
+            findLandXmlFiles(apiBaseUrl, ctx.rootId, token),
+            findIfcFiles(apiBaseUrl, ctx.rootId, token)
+        ]);
+
         fileCatalog = new Map();
+        ifcCatalog = new Map();
+        selectedIfcIds = new Set([...selectedIfcIds].filter((id) => ifcFiles.some((f) => f.id === id)));
+
+        for (const file of ifcFiles) ifcCatalog.set(file.id, file);
+        renderIfcList(ifcFiles);
+
         if (files.length === 0) {
             els.projectFiles.innerHTML = '<option value="">No LandXML files found</option>';
-            updateStatus("No .xml / .landxml files found in this project.", "warn");
+            updateStatus(
+                ifcFiles.length
+                    ? `No LandXML files found. ${ifcFiles.length} IFC file${ifcFiles.length === 1 ? "" : "s"} available for naming.`
+                    : "No .xml / .landxml files found in this project.",
+                "warn"
+            );
         } else {
             els.projectFiles.innerHTML = '<option value="">Select a LandXML file…</option>';
             for (const file of files) {
@@ -379,12 +412,17 @@ async function loadProjectFiles() {
                 opt.title = file.path;
                 els.projectFiles.appendChild(opt);
             }
-            updateStatus(`Found ${files.length} LandXML file${files.length === 1 ? "" : "s"}.`, "success");
+            const ifcPart = ifcFiles.length ? ` · ${ifcFiles.length} IFC` : "";
+            updateStatus(`Found ${files.length} LandXML${ifcPart}.`, "success");
         }
+
+        if (alignments.length && selectedIfcIds.size) await refreshAlignmentNames(false);
+        else updateIfcMatchCount();
     } catch (e) {
         console.error("Load files error:", e);
         updateStatus(`Could not list files: ${e.message}`, "error");
         els.projectFiles.innerHTML = '<option value="">-- Error loading files --</option>';
+        renderIfcList([]);
     } finally {
         setBusy(false);
     }
@@ -439,10 +477,14 @@ async function resolveDownloadUrl(fileMeta, token) {
     throw lastError || new Error("Could not resolve download URL.");
 }
 
-async function downloadLandXml(fileMeta) {
+async function downloadProjectFileText(fileMeta) {
     const token = await getAccessToken();
     const url = await resolveDownloadUrl(fileMeta, token);
     return fetchFileText(url);
+}
+
+async function downloadLandXml(fileMeta) {
+    return downloadProjectFileText(fileMeta);
 }
 
 async function handleConnectFileSelected(file) {
@@ -473,7 +515,7 @@ async function loadLandXmlFromProject(fileMeta) {
         console.error("Download error:", e);
         const corsHint =
             String(e.message || "").includes("Failed to fetch")
-                ? " Browser blocked the Trimble API request (CORS). Try “Open local XML…” or re-open the extension from Connect."
+                ? " Open the extension from Trimble Connect so project files can be accessed."
                 : "";
         updateStatus(`Download failed: ${e.message}${corsHint}`, "error");
     } finally {
@@ -489,35 +531,161 @@ async function handleFileSelection() {
     await loadLandXmlFromProject(fileMeta);
 }
 
-function handleLocalFileSelection(event) {
-    const file = event.target.files?.[0];
-    if (!file) return;
-    setBusy(true);
-    updateStatus(`Reading ${file.name}…`, "info");
-    alignments = [];
-    els.listItems.innerHTML = "";
-    els.alignmentSection.classList.add("hidden");
-    els.projectFiles.value = "";
+function renderIfcList(files) {
+    if (!els.ifcList) return;
+    if (!files.length) {
+        els.ifcList.innerHTML = '<p class="placeholder-text">No IFC files found in this project.</p>';
+        return;
+    }
 
-    const reader = new FileReader();
-    reader.onload = () => {
-        try {
-            parseLandXML(String(reader.result || ""));
-        } catch (e) {
-            updateStatus(`Could not read file: ${e.message}`, "error");
-        } finally {
-            setBusy(false);
-            syncActionButtons();
-            event.target.value = "";
+    els.ifcList.innerHTML = "";
+    for (const file of files) {
+        const row = document.createElement("label");
+        row.className = "ifc-item check-row";
+        const cb = document.createElement("input");
+        cb.type = "checkbox";
+        cb.value = file.id;
+        cb.checked = selectedIfcIds.has(file.id);
+        cb.addEventListener("change", () => {
+            if (cb.checked) selectedIfcIds.add(file.id);
+            else selectedIfcIds.delete(file.id);
+            refreshAlignmentNames();
+        });
+        const span = document.createElement("span");
+        span.textContent = file.path;
+        span.title = file.path;
+        row.appendChild(cb);
+        row.appendChild(span);
+        els.ifcList.appendChild(row);
+    }
+}
+
+function addStationRefMatch(map, raw) {
+    const match = String(raw).match(/Alignment\s+([A-Za-z0-9]+)\s*\(([^)]+)\)/i);
+    if (match) map.set(match[1].toUpperCase(), match[2].trim());
+}
+
+function parseAlignmentNamesFromIfc(text) {
+    const map = new Map();
+    const broad = /Alignment\s+([A-Za-z0-9]+)\s*\(([^)]+)\)/g;
+    let m;
+    while ((m = broad.exec(text)) !== null) {
+        const code = m[1].toUpperCase();
+        const label = m[2].trim();
+        if (code && label && !map.has(code)) map.set(code, label);
+    }
+
+    const propPattern = /SBG_STATION_REF[^'"]*['"]([^'"]+)['"]/gi;
+    while ((m = propPattern.exec(text)) !== null) addStationRefMatch(map, m[1]);
+
+    return map;
+}
+
+function extractAlignmentCode(landXmlName) {
+    const n = String(landXmlName || "").trim();
+    if (!n) return "";
+    const withoutPrefix = n.replace(/^A(?=[0-9])/i, "");
+    const match = withoutPrefix.match(/([0-9]+[A-Za-z]?)/);
+    return (match ? match[1] : withoutPrefix).toUpperCase();
+}
+
+function resolveAlignmentDisplayName(landXmlName) {
+    const code = extractAlignmentCode(landXmlName);
+    return code ? alignmentNameMap.get(code) || null : null;
+}
+
+function updateIfcMatchCount() {
+    if (!els.ifcMatchCount) return;
+    if (!alignments.length) {
+        els.ifcMatchCount.textContent = alignmentNameMap.size ? `${alignmentNameMap.size} names` : "";
+        return;
+    }
+    let matched = 0;
+    for (const align of alignments) {
+        if (resolveAlignmentDisplayName(align.name)) matched += 1;
+    }
+    if (matched) els.ifcMatchCount.textContent = `${matched}/${alignments.length} named`;
+    else if (alignmentNameMap.size) els.ifcMatchCount.textContent = `${alignmentNameMap.size} names`;
+    else els.ifcMatchCount.textContent = "";
+}
+
+async function refreshAlignmentNames(updateStatusBar = true) {
+    if (!selectedIfcIds.size) {
+        alignmentNameMap = new Map();
+        updateIfcMatchCount();
+        if (alignments.length) renderAlignmentList();
+        return;
+    }
+
+    if (updateStatusBar) updateStatus("Reading IFC name sources…", "info");
+    try {
+        const merged = new Map();
+        for (const id of selectedIfcIds) {
+            const meta = ifcCatalog.get(id);
+            if (!meta) continue;
+            try {
+                const text = await downloadProjectFileText(meta);
+                const map = parseAlignmentNamesFromIfc(text);
+                for (const [code, label] of map) {
+                    if (!merged.has(code)) merged.set(code, label);
+                }
+            } catch (err) {
+                console.warn(`IFC parse failed for ${meta.path}:`, err);
+            }
         }
-    };
-    reader.onerror = () => {
-        updateStatus("Could not read the selected file.", "error");
-        setBusy(false);
-        syncActionButtons();
-        event.target.value = "";
-    };
-    reader.readAsText(file);
+        alignmentNameMap = merged;
+        updateIfcMatchCount();
+        if (alignments.length) renderAlignmentList();
+        if (updateStatusBar) {
+            updateStatus(
+                `Loaded ${alignmentNameMap.size} alignment name${alignmentNameMap.size === 1 ? "" : "s"} from IFC.`,
+                "success"
+            );
+        }
+    } catch (e) {
+        console.error("IFC name refresh failed:", e);
+        if (updateStatusBar) updateStatus(`Could not read IFC names: ${e.message}`, "error");
+    }
+}
+
+function buildAlignmentLabelHtml(align) {
+    const name = align.name;
+    const displayName = resolveAlignmentDisplayName(name);
+    const node = align.node;
+    const lengthAttr = node.getAttribute("length");
+    const staStart = node.getAttribute("staStart");
+    const metaParts = [];
+    if (staStart != null) metaParts.push(`Start ${formatStation(parseFloat(staStart) || 0)}`);
+    if (lengthAttr != null) metaParts.push(`${Number(lengthAttr).toFixed(1)} m`);
+    if (align.profile) metaParts.push("profile");
+
+    if (displayName) {
+        return `
+            <span class="alignment-title">${escapeHtml(displayName)}</span>
+            <span class="alignment-code">${escapeHtml(name)}</span>
+            ${metaParts.length ? `<span class="alignment-meta">${escapeHtml(metaParts.join(" · "))}</span>` : ""}
+        `;
+    }
+    return `
+        ${escapeHtml(name)}
+        ${metaParts.length ? `<span class="alignment-meta">${escapeHtml(metaParts.join(" · "))}</span>` : ""}
+    `;
+}
+
+function renderAlignmentList() {
+    els.listItems.innerHTML = "";
+    for (const align of alignments) {
+        const div = document.createElement("div");
+        div.className = "alignment-item";
+        div.innerHTML = `
+            <input type="checkbox" id="align-${align.id}" value="${align.id}" checked>
+            <label for="align-${align.id}">${buildAlignmentLabelHtml(align)}</label>
+        `;
+        els.listItems.appendChild(div);
+    }
+    els.alignmentCount.textContent = `(${alignments.length})`;
+    els.alignmentSection.classList.toggle("hidden", alignments.length === 0);
+    syncActionButtons();
 }
 
 function localName(node) {
@@ -559,6 +727,7 @@ function parseLandXML(xmlText) {
     if (alignmentNodes.length === 0) {
         updateStatus("No <Alignment> elements found in this file.", "warn");
         els.alignmentSection.classList.add("hidden");
+        updateIfcMatchCount();
         syncActionButtons();
         return;
     }
@@ -567,32 +736,14 @@ function parseLandXML(xmlText) {
         const node = alignmentNodes[i];
         const name = node.getAttribute("name") || `Alignment ${i + 1}`;
         const profile = findProfileForAlignment(node, name, xmlDoc);
-        const lengthAttr = node.getAttribute("length");
-        const staStart = node.getAttribute("staStart");
 
         alignments.push({ id: i, name, node, profile });
-
-        const div = document.createElement("div");
-        div.className = "alignment-item";
-        const metaParts = [];
-        if (staStart != null) metaParts.push(`Start ${formatStation(parseFloat(staStart) || 0)}`);
-        if (lengthAttr != null) metaParts.push(`${Number(lengthAttr).toFixed(1)} m`);
-        if (profile) metaParts.push("profile");
-
-        div.innerHTML = `
-            <input type="checkbox" id="align-${i}" value="${i}" checked>
-            <label for="align-${i}">
-                ${escapeHtml(name)}
-                ${metaParts.length ? `<span class="alignment-meta">${escapeHtml(metaParts.join(" · "))}</span>` : ""}
-            </label>
-        `;
-        els.listItems.appendChild(div);
     }
 
-    els.alignmentCount.textContent = `(${alignments.length})`;
-    els.alignmentSection.classList.remove("hidden");
+    renderAlignmentList();
+    updateIfcMatchCount();
+    if (selectedIfcIds.size) refreshAlignmentNames(false);
     updateStatus(`Loaded ${alignments.length} alignment${alignments.length === 1 ? "" : "s"}.`, "success");
-    syncActionButtons();
 }
 
 function escapeHtml(str) {
@@ -635,15 +786,14 @@ async function drawSelectedAlignments() {
     }
 
     const settings = {
-        drawAlign: els.drawAlignments.checked,
         drawSta: els.drawStationing.checked,
         drawText: els.drawText.checked,
         interval: Math.max(1, parseFloat(els.stationInterval.value) || 100),
-        swap: els.swapNE.checked
+        swap: SWAP_NE
     };
 
-    if (!settings.drawAlign && !settings.drawSta && !settings.drawText) {
-        updateStatus("Enable at least one display option.", "warn");
+    if (!settings.drawSta && !settings.drawText) {
+        updateStatus("Enable station ticks or labels.", "warn");
         return;
     }
 
@@ -675,7 +825,7 @@ async function drawSelectedAlignments() {
         updateStatus(`Drawing ${lines.length} lines, ${texts.length} labels…`, "info");
         await addMarkups(lines, texts);
         updateStatus(
-            `Drawn ${selectedIds.length} alignment${selectedIds.length === 1 ? "" : "s"} (${lines.length} segments).`,
+            `Applied stationing to ${selectedIds.length} alignment${selectedIds.length === 1 ? "" : "s"} (${texts.length} labels).`,
             "success"
         );
     } catch (e) {
@@ -960,28 +1110,6 @@ function processAlignment(align, settings) {
 
     const getEl = makeElevFn(extractPvis(align.profile));
 
-    if (settings.drawAlign) {
-        for (let i = 0; i < points.length - 1; i++) {
-            const p1 = points[i];
-            const p2 = points[i + 1];
-            if (dist(p1, p2) < 0.001) continue;
-            lines.push({
-                id: idCounter++,
-                color: { r: 255, g: 214, b: 0, a: 1 },
-                start: {
-                    positionX: p1.x * MM,
-                    positionY: p1.y * MM,
-                    positionZ: getEl(p1.sta) * MM
-                },
-                end: {
-                    positionX: p2.x * MM,
-                    positionY: p2.y * MM,
-                    positionZ: getEl(p2.sta) * MM
-                }
-            });
-        }
-    }
-
     if (settings.drawSta || settings.drawText) {
         const sSta = points[0].sta || 0;
         const eSta = points[points.length - 1].sta || 0;
@@ -1051,10 +1179,6 @@ function processAlignment(align, settings) {
 // Events
 els.reloadBtn.addEventListener("click", loadProjectFiles);
 els.projectFiles.addEventListener("change", handleFileSelection);
-if (els.localFileBtn && els.localFileInput) {
-    els.localFileBtn.addEventListener("click", () => els.localFileInput.click());
-    els.localFileInput.addEventListener("change", handleLocalFileSelection);
-}
 els.drawBtn.addEventListener("click", drawSelectedAlignments);
 els.clearBtn.addEventListener("click", clearMarkups);
 els.selectAllBtn.addEventListener("click", () => setAllChecks(true));

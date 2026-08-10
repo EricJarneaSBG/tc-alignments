@@ -16,7 +16,6 @@
     --tc-warn: #ef6c00;
     --tc-warn-bg: #fff3e0;
     --radius: 4px;
-    --space: 12px;
     --font: "Segoe UI", "Open Sans", Tahoma, sans-serif;
 }
 
@@ -50,28 +49,38 @@ body {
 
 .app-header {
     flex-shrink: 0;
-    padding: 10px 14px;
+    padding: 12px 14px;
     border-bottom: 1px solid var(--tc-border);
     background: var(--tc-surface);
 }
 
 .app-title {
     display: flex;
-    align-items: baseline;
+    align-items: flex-start;
     justify-content: space-between;
-    gap: 8px;
+    gap: 12px;
 }
 
 .app-title-text {
-    font-size: 14px;
+    display: block;
+    font-size: 15px;
     font-weight: 600;
     letter-spacing: 0.01em;
+}
+
+.app-subtitle {
+    display: block;
+    margin-top: 2px;
+    font-size: 11px;
+    color: var(--tc-muted);
+    font-weight: 400;
 }
 
 .app-version {
     font-size: 11px;
     color: var(--tc-muted);
     font-weight: 400;
+    white-space: nowrap;
 }
 
 .app-main {
@@ -107,6 +116,21 @@ body {
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.04em;
+    color: var(--tc-text-secondary);
+}
+
+.section-hint {
+    margin: 0;
+    font-size: 11px;
+    line-height: 1.45;
+    color: var(--tc-muted);
+}
+
+.section-hint code {
+    font-size: 10px;
+    padding: 1px 4px;
+    border-radius: 3px;
+    background: var(--tc-bg);
     color: var(--tc-text-secondary);
 }
 
@@ -183,6 +207,88 @@ body {
     to { transform: rotate(360deg); }
 }
 
+.ifc-list,
+.alignment-list {
+    border: 1px solid var(--tc-border);
+    border-radius: var(--radius);
+    max-height: 140px;
+    overflow-y: auto;
+    background: var(--tc-surface);
+}
+
+.placeholder-text {
+    margin: 0;
+    padding: 10px 12px;
+    font-size: 12px;
+    color: var(--tc-muted);
+}
+
+.ifc-item,
+.alignment-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--tc-border);
+}
+
+.ifc-item:last-child,
+.alignment-item:last-child {
+    border-bottom: none;
+}
+
+.ifc-item:hover,
+.alignment-item:hover {
+    background: #fafafa;
+}
+
+.ifc-item input,
+.alignment-item input {
+    margin-top: 2px;
+    accent-color: var(--tc-blue);
+}
+
+.ifc-item label,
+.alignment-item label {
+    flex: 1;
+    cursor: pointer;
+    word-break: break-word;
+}
+
+.ifc-name {
+    display: block;
+    font-size: 12px;
+    color: var(--tc-text);
+}
+
+.ifc-path {
+    display: block;
+    margin-top: 2px;
+    font-size: 11px;
+    color: var(--tc-muted);
+}
+
+.alignment-title {
+    display: block;
+    font-weight: 600;
+    color: var(--tc-text);
+}
+
+.alignment-code {
+    display: block;
+    margin-top: 1px;
+    font-size: 11px;
+    font-family: Consolas, "Courier New", monospace;
+    color: var(--tc-text-secondary);
+}
+
+.alignment-meta {
+    display: block;
+    margin-top: 2px;
+    font-size: 11px;
+    color: var(--tc-muted);
+}
+
 .status-bar {
     padding: 8px 10px;
     border-radius: var(--radius);
@@ -210,11 +316,6 @@ body {
     color: #e65100;
 }
 
-.status-bar[data-tone="info"] {
-    border-left-color: var(--tc-blue);
-    background: var(--tc-blue-soft);
-}
-
 .link-actions {
     display: flex;
     gap: 4px;
@@ -235,48 +336,6 @@ body {
 .text-btn:hover {
     background: var(--tc-blue-soft);
     text-decoration: underline;
-}
-
-.alignment-list {
-    border: 1px solid var(--tc-border);
-    border-radius: var(--radius);
-    max-height: 180px;
-    overflow-y: auto;
-    background: var(--tc-surface);
-}
-
-.alignment-item {
-    display: flex;
-    align-items: flex-start;
-    gap: 8px;
-    padding: 8px 10px;
-    border-bottom: 1px solid var(--tc-border);
-}
-
-.alignment-item:last-child {
-    border-bottom: none;
-}
-
-.alignment-item:hover {
-    background: #fafafa;
-}
-
-.alignment-item input {
-    margin-top: 2px;
-    accent-color: var(--tc-blue);
-}
-
-.alignment-item label {
-    flex: 1;
-    cursor: pointer;
-    word-break: break-word;
-}
-
-.alignment-meta {
-    display: block;
-    margin-top: 2px;
-    font-size: 11px;
-    color: var(--tc-muted);
 }
 
 .settings-list {
@@ -372,9 +431,4 @@ body {
 .btn-secondary:hover:not(:disabled) {
     background: var(--tc-bg);
     border-color: #9e9e9e;
-}
-
-.btn-block {
-    width: 100%;
-    margin-top: 6px;
 }

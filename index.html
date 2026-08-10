@@ -3,24 +3,26 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Alignment Visualizer</title>
+    <title>Alignment Stationing</title>
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
-    <!-- Direction: Fix region/files/profiles/N-E + Trimble-native panel; Power BI dropped. -->
     <div id="app">
         <header class="app-header">
             <div class="app-title">
-                <span class="app-title-text">Alignments</span>
-                <span id="version-display" class="app-version">v1.1.1</span>
+                <div>
+                    <span class="app-title-text">Alignment Stationing</span>
+                    <span class="app-subtitle">LandXML labels in the 3D viewer</span>
+                </div>
+                <span id="version-display" class="app-version">v1.2.0</span>
             </div>
         </header>
 
         <main class="app-main">
             <section class="panel-section">
                 <div class="section-label-row">
-                    <label class="section-label" for="project-files">LandXML file</label>
-                    <button id="reload-files-btn" class="icon-btn" type="button" title="Reload project files" aria-label="Reload project files">
+                    <label class="section-label" for="project-files">LandXML</label>
+                    <button id="reload-files-btn" class="icon-btn" type="button" title="Refresh project files" aria-label="Refresh project files">
                         <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
                             <path d="M13.5 8a5.5 5.5 0 1 1-1.4-3.6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
                             <path d="M13.5 3.5v3h-3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
@@ -30,8 +32,17 @@
                 <select id="project-files" class="select" disabled>
                     <option value="">Connecting…</option>
                 </select>
-                <input id="local-file-input" type="file" accept=".xml,.landxml,text/xml,application/xml" hidden>
-                <button id="local-file-btn" class="btn btn-secondary btn-block" type="button">Open local XML…</button>
+            </section>
+
+            <section class="panel-section">
+                <div class="section-label-row">
+                    <span class="section-label">IFC name sources</span>
+                    <span id="ifc-match-count" class="muted"></span>
+                </div>
+                <p class="section-hint">Select IFC models that contain road elements with <code>SBG_STATION_REF</code> to show descriptive alignment names.</p>
+                <div id="ifc-list" class="ifc-list">
+                    <p class="placeholder-text">IFC files will appear after connecting.</p>
+                </div>
             </section>
 
             <section id="status-bar" class="status-bar" data-tone="info" role="status">
@@ -50,12 +61,8 @@
             </section>
 
             <section class="panel-section">
-                <span class="section-label">Display</span>
+                <span class="section-label">Stationing</span>
                 <div class="settings-list">
-                    <label class="check-row">
-                        <input type="checkbox" id="draw-alignments" checked>
-                        <span>Alignment lines</span>
-                    </label>
                     <label class="check-row">
                         <input type="checkbox" id="draw-stationing" checked>
                         <span>Station ticks</span>
@@ -64,12 +71,8 @@
                         <input type="checkbox" id="draw-text" checked>
                         <span>Station labels</span>
                     </label>
-                    <label class="check-row">
-                        <input type="checkbox" id="swap-ne" checked>
-                        <span>Swap Northing / Easting</span>
-                    </label>
                     <label class="field-row" for="station-interval">
-                        <span>Station interval</span>
+                        <span>Interval</span>
                         <span class="field-inline">
                             <input type="number" id="station-interval" class="input-num" value="100" min="1" step="1">
                             <span class="unit">m</span>
@@ -80,8 +83,8 @@
         </main>
 
         <footer class="app-footer">
-            <button id="draw-btn" class="btn btn-primary" type="button" disabled>Draw selected</button>
-            <button id="clear-btn" class="btn btn-secondary" type="button" disabled>Clear viewer</button>
+            <button id="draw-btn" class="btn btn-primary" type="button" disabled>Apply stationing</button>
+            <button id="clear-btn" class="btn btn-secondary" type="button" disabled>Clear labels</button>
         </footer>
     </div>
 
