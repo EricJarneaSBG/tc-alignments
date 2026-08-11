@@ -2,7 +2,7 @@
  * LandXML Alignment Stationing for Trimble Connect
  * Station ticks/labels from LandXML; list labels use Alignment desc when present.
  */
-const VERSION = "v1.2.4";
+const VERSION = "v1.3.0";
 console.log(`Alignment Stationing ${VERSION} loaded.`);
 
 const REGION_BASES = {
@@ -31,17 +31,15 @@ const CLEAR_CHUNK = 400;
 const MAX_FOLDER_DEPTH = 8;
 const MAX_FOLDERS = 200;
 
-/** Label styling — TC TextMarkup only supports text + color + start/end (size ≈ |end-start|). */
+/**
+ * Construsoft-style station markups (same public Markup API):
+ * black point on alignment + leader line + text sitting on that leader.
+ */
 const LABEL = {
-    // Dark colors for Trimble's light viewer background
-    stationColor: { r: 0, g: 105, b: 170, a: 1 },
-    terminusColor: { r: 200, g: 80, b: 0, a: 1 },
-    tickColor: { r: 0, g: 105, b: 170, a: 1 },
-    terminusTickColor: { r: 200, g: 80, b: 0, a: 1 },
-    textHeightM: 1.8,
-    liftM: 0.8,
-    tickHalfM: 1.0,
-    terminusTickHalfM: 1.6,
+    color: { r: 20, g: 20, b: 20, a: 1 },
+    leaderLenM: 7.5,
+    textGapM: 0.6,
+    terminusLeaderLenM: 9.5,
     dedupeCellM: 1.25
 };
 
@@ -687,22 +685,24 @@ async function drawSelectedAlignments() {
         updateStatus("Building geometry…", "info");
         const lines = [];
         const texts = [];
+        const points = [];
         const occupied = new Set();
         for (const id of selectedIds) {
             const geom = processAlignment(alignments[id], settings, occupied);
             lines.push(...geom.lines);
             texts.push(...geom.texts);
+            points.push(...geom.points);
         }
 
-        if (lines.length === 0 && texts.length === 0) {
+        if (lines.length === 0 && texts.length === 0 && points.length === 0) {
             updateStatus("No drawable geometry found for the selection.", "warn");
             return;
         }
 
-        updateStatus(`Drawing ${texts.length} labels, ${lines.length} ticks…`, "info");
-        await addMarkups(lines, texts);
+        updateStatus(`Drawing ${texts.length} labels…`, "info");
+        await addMarkups(lines, texts, points);
         updateStatus(
-            `Applied stationing to ${selectedIds.length} alignment${selectedIds.length === 1 ? "" : "s"} (${texts.length} labels).`,
+            `Applied stationing to ${selectedIds.length} alignment${selectedIds.length === 1 ? "" : "s"} (${texts.length || points.length} stations).`,
             "success"
         );
     } catch (e) {
@@ -737,7 +737,7 @@ async function clearMarkupsInternal() {
     await Promise.all(jobs);
 }
 
-async function addMarkups(lines, texts) {
+async function addMarkups(lines, texts, points = []) {
     const addBatch = async (items, singular, plural) => {
         if (!items.length) return;
         for (let i = 0; i < items.length; i += BATCH) {
@@ -761,6 +761,8 @@ async function addMarkups(lines, texts) {
         }
     };
 
+    // Point → leader → text so labels sit on the underline like Construsoft Chainage
+    await addBatch(points, null, TC_API.markup.addSinglePointMarkups);
     await addBatch(lines, TC_API.markup.addLineMarkup, TC_API.markup.addLineMarkups);
     await addBatch(texts, null, TC_API.markup.addTextMarkup || TC_API.markup.addTextMarkups);
 }
@@ -1008,22 +1010,26 @@ function makeElevFn(pvis) {
     };
 }
 
+function mmPos(x, y, z) {
+    return { positionX: x * MM, positionY: y * MM, positionZ: z * MM };
+}
+
 function processAlignment(align, settings, occupied = new Set()) {
     const lines = [];
     const texts = [];
-    const points = collectGeomPoints(align, settings.swap);
-    if (points.length < 2) return { lines, texts };
+    const points = [];
+    const geom = collectGeomPoints(align, settings.swap);
+    if (geom.length < 2) return { lines, texts, points };
 
     const getEl = makeElevFn(extractPvis(align.profile));
 
     if (settings.drawSta || settings.drawText) {
-        const sSta = points[0].sta || 0;
-        const eSta = points[points.length - 1].sta || 0;
+        const sSta = geom[0].sta || 0;
+        const eSta = geom[geom.length - 1].sta || 0;
         const stations = [];
         const startTick = Math.ceil((sSta + 0.001) / settings.interval) * settings.interval;
         for (let s = startTick; s < eSta - 0.001; s += settings.interval) stations.push({ s, kind: "station" });
 
-        // Only add termini when they are not already covered by an interval station
         if (stations.every((st) => Math.abs(st.s - sSta) > 0.05)) {
             stations.unshift({ s: sSta, kind: "start" });
         }
@@ -1032,82 +1038,63 @@ function processAlignment(align, settings, occupied = new Set()) {
         }
 
         for (const { s, kind } of stations) {
-            const frame = tangentNormal(points, s);
+            const frame = tangentNormal(geom, s);
             if (!frame) continue;
             const { p, nx, ny } = frame;
             const el = getEl(s);
-            const isTerminus = kind === "start" || kind === "end";
-            const color = isTerminus ? LABEL.terminusColor : LABEL.stationColor;
-            const tickColor = isTerminus ? LABEL.terminusTickColor : LABEL.tickColor;
             const cell = labelCellKey(p.x, p.y, el);
+            if (occupied.has(cell)) continue;
+            occupied.add(cell);
 
-            if (settings.drawText) {
-                if (!occupied.has(cell)) {
-                    occupied.add(cell);
-                    const label =
-                        kind === "start"
-                            ? `S ${formatStation(s)}`
-                            : kind === "end"
-                              ? `E ${formatStation(s, { decimals: 1 })}`
-                              : formatStation(s);
-                    const z0 = el + LABEL.liftM;
-                    texts.push({
-                        id: idCounter++,
-                        text: label,
-                        color,
-                        start: {
-                            positionX: p.x * MM,
-                            positionY: p.y * MM,
-                            positionZ: z0 * MM
-                        },
-                        end: {
-                            positionX: p.x * MM,
-                            positionY: p.y * MM,
-                            positionZ: (z0 + LABEL.textHeightM) * MM
-                        }
-                    });
+            const isTerminus = kind === "start" || kind === "end";
+            const color = LABEL.color;
 
-                    // Short vertical stub from alignment up to the label base
-                    if (LABEL.liftM > 0.05) {
-                        lines.push({
-                            id: idCounter++,
-                            color: tickColor,
-                            start: {
-                                positionX: p.x * MM,
-                                positionY: p.y * MM,
-                                positionZ: el * MM
-                            },
-                            end: {
-                                positionX: p.x * MM,
-                                positionY: p.y * MM,
-                                positionZ: z0 * MM
-                            }
-                        });
-                    }
-                }
+            // Black point on the alignment (Construsoft-style tick)
+            if (settings.drawSta || settings.drawText) {
+                points.push({
+                    id: idCounter++,
+                    color,
+                    start: mmPos(p.x, p.y, el)
+                });
             }
 
-            if (settings.drawSta) {
-                const tL = isTerminus ? LABEL.terminusTickHalfM : LABEL.tickHalfM;
+            if (settings.drawText) {
+                const label =
+                    kind === "start"
+                        ? `S ${formatStation(s)}`
+                        : kind === "end"
+                          ? `E ${formatStation(s, { decimals: 1 })}`
+                          : formatStation(s);
+
+                // Scale leader to label length so text sits cleanly on the underline
+                const baseLen = isTerminus ? LABEL.terminusLeaderLenM : LABEL.leaderLenM;
+                const leaderLen = Math.max(baseLen, label.length * 0.9);
+                const gap = Math.min(LABEL.textGapM, leaderLen * 0.15);
+                const ex = p.x + nx * leaderLen;
+                const ey = p.y + ny * leaderLen;
+                const tx0 = p.x + nx * gap;
+                const ty0 = p.y + ny * gap;
+
                 lines.push({
                     id: idCounter++,
-                    color: tickColor,
-                    start: {
-                        positionX: (p.x - nx * tL) * MM,
-                        positionY: (p.y - ny * tL) * MM,
-                        positionZ: el * MM
-                    },
-                    end: {
-                        positionX: (p.x + nx * tL) * MM,
-                        positionY: (p.y + ny * tL) * MM,
-                        positionZ: el * MM
-                    }
+                    color,
+                    start: mmPos(p.x, p.y, el),
+                    end: mmPos(ex, ey, el)
+                });
+
+                // Text start→end along the leader (same Z) so it rides on the underline
+                texts.push({
+                    id: idCounter++,
+                    text: label,
+                    color,
+                    start: mmPos(tx0, ty0, el),
+                    end: mmPos(ex, ey, el)
                 });
             }
         }
     }
 
-    return { lines, texts };
+    return { lines, texts, points };
 }
 
 // Events
